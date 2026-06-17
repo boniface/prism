@@ -1,0 +1,4 @@
+target/x86_64-unknown-linux-musl/release/prism-agent usr/bin/
+config/example.yaml etc/prism/config.yaml
+deploy/systemd/prism-agent.service lib/systemd/system/prism-agent.service
+LICENSE usr/share/doc/prism-agent/LICENSE

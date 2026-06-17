@@ -1,0 +1,197 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Semantic version, for example v0.1.0-alpha.1
+        required: true
+        type: string
+      channel:
+        description: Release channel
+        required: true
+        type: choice
+        options:
+          - alpha
+          - beta
+          - stable
+      publish:
+        description: Type PUBLISH to create the draft release and push image
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/prism-agent
+  DIST_TARGET: x86_64-unknown-linux-musl
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      semver: ${{ steps.version.outputs.semver }}
+      deb_version: ${{ steps.package_versions.outputs.deb_version }}
+      rpm_version: ${{ steps.package_versions.outputs.rpm_version }}
+      rpm_release: ${{ steps.package_versions.outputs.rpm_release }}
+      prerelease: ${{ steps.channel.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate publish confirmation
+        run: |
+          test "${{ inputs.publish }}" = "PUBLISH"
+
+      - name: Validate version
+        id: version
+        run: |
+          version="${{ inputs.version }}"
+          if ! printf '%s' "$version" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "invalid version: $version" >&2
+            exit 1
+          fi
+          if git ls-remote --tags origin "refs/tags/${version}" | grep -q "${version}"; then
+            echo "tag already exists: $version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "semver=${version#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Validate channel
+        id: channel
+        run: |
+          version="${{ inputs.version }}"
+          channel="${{ inputs.channel }}"
+          case "$channel" in
+            alpha)
+              printf '%s' "$version" | grep -q -- '-alpha' || {
+                echo "alpha releases must use an -alpha prerelease version" >&2
+                exit 1
+              }
+              echo "prerelease=true" >> "$GITHUB_OUTPUT"
+              ;;
+            beta)
+              printf '%s' "$version" | grep -q -- '-beta' || {
+                echo "beta releases must use a -beta prerelease version" >&2
+                exit 1
+              }
+              echo "prerelease=true" >> "$GITHUB_OUTPUT"
+              ;;
+            stable)
+              test -f docs/production-certification.md || {
+                echo "stable releases require docs/production-certification.md" >&2
+                exit 1
+              }
+              if printf '%s' "$version" | grep -q -- '-'; then
+                echo "stable releases must not use a prerelease version" >&2
+                exit 1
+              fi
+              echo "prerelease=false" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      - name: Resolve package versions
+        id: package_versions
+        run: ./scripts/package-versions.sh "${{ steps.version.outputs.semver }}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: validate
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt,rust-src
+          targets: x86_64-unknown-linux-musl
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: clippy,rustfmt,rust-src
+
+      - name: Use stable by default
+        run: rustup default stable
+
+      - name: Install system tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm linux-tools-common linux-tools-generic musl-tools
+
+      - name: Install Rust tools
+        run: |
+          cargo install bpf-linker cargo-audit cargo-deny cargo-deb cargo-generate-rpm --locked
+
+      - name: Install Syft
+        uses: anchore/sbom-action/download-syft@v0
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Run quality gates
+        run: make ci
+
+      - name: Build distribution artifacts
+        run: |
+          make dist \
+            VERSION=${{ needs.validate.outputs.semver }} \
+            DEB_VERSION=${{ needs.validate.outputs.deb_version }} \
+            RPM_VERSION=${{ needs.validate.outputs.rpm_version }} \
+            RPM_RELEASE=${{ needs.validate.outputs.rpm_release }}
+
+      - name: Build container image
+        run: |
+          docker build \
+            --tag "$IMAGE_NAME:${{ needs.validate.outputs.version }}" \
+            --tag "$IMAGE_NAME:${{ inputs.channel }}" \
+            .
+
+      - name: Generate SBOM
+        run: syft dir:. -o cyclonedx-json=target/dist/prism-agent-${{ needs.validate.outputs.semver }}.sbom.cdx.json
+
+      - name: Generate checksums
+        run: |
+          cd target/dist
+          sha256sum * > SHA256SUMS
+
+      - name: Keyless sign artifacts when available
+        continue-on-error: ${{ inputs.channel != 'stable' }}
+        run: |
+          cosign sign-blob --yes --bundle target/dist/SHA256SUMS.bundle target/dist/SHA256SUMS
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push image
+        run: |
+          docker push "$IMAGE_NAME:${{ needs.validate.outputs.version }}"
+          docker push "$IMAGE_NAME:${{ inputs.channel }}"
+          if [ "${{ inputs.channel }}" = "stable" ]; then
+            docker tag "$IMAGE_NAME:${{ needs.validate.outputs.version }}" "$IMAGE_NAME:latest"
+            docker push "$IMAGE_NAME:latest"
+          fi
+
+      - name: Sign container image
+        continue-on-error: ${{ inputs.channel != 'stable' }}
+        run: cosign sign --yes "$IMAGE_NAME:${{ needs.validate.outputs.version }}"
+
+      - name: Create draft GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.validate.outputs.version }}
+          name: Prism ${{ needs.validate.outputs.version }}
+          draft: true
+          prerelease: ${{ needs.validate.outputs.prerelease }}
+          generate_release_notes: true
+          files: |
+            target/dist/*

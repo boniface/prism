@@ -1,0 +1,30 @@
+image:
+  repository: ghcr.io/boniface/prism-agent
+  tag: 0.1.0-alpha.0
+  pullPolicy: IfNotPresent
+
+prometheus:
+  port: 9090
+
+metadata:
+  provider: cri
+  criSocketPath: /run/containerd/containerd.sock
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+securityContext:
+  privileged: false
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+    add:
+      - BPF
+      - PERFMON

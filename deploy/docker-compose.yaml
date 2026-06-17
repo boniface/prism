@@ -1,0 +1,18 @@
+services:
+  prism-agent:
+    image: ghcr.io/boniface/prism-agent:dev
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    pid: host
+    network_mode: host
+    cap_add:
+      - BPF
+      - PERFMON
+    volumes:
+      - /sys/fs/bpf:/sys/fs/bpf:rw
+      - /sys/fs/cgroup:/sys/fs/cgroup:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      PRISM_EBPF_OBJECT: /usr/lib/prism/prism-ebpf
+      PRISM_BPF_PIN_PATH: /sys/fs/bpf/prism

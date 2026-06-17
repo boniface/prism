@@ -31,6 +31,23 @@ make build
 
 The eBPF lifecycle proof requires Linux with cgroup v2, BTF, bpffs mounted at `/sys/fs/bpf`, `bpf-linker`, nightly Rust with `rust-src`, and permission to load eBPF programs.
 
+## Packaging And Releases
+
+Release packaging is wired early so the distribution path is tested from the start. Manual releases are created with the GitHub Actions `Release` workflow. The workflow builds the tarball, Debian package, RPM package, Helm chart, GHCR image, SBOM, checksums, and draft GitHub Release.
+
+Stable releases are intentionally blocked until `docs/production-certification.md` exists. Alpha and beta releases are allowed only from explicit `workflow_dispatch` runs where the maintainer enters `PUBLISH`.
+
+Local package commands:
+
+```bash
+make package
+make package-deb
+make package-rpm
+make package-helm
+```
+
+The shipped product remains one executable, `prism-agent`. The other workspace crates are internal implementation boundaries and are not installed or operated by users.
+
 ## Running The Lifecycle Proof
 
 ```bash

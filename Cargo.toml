@@ -6,7 +6,7 @@ resolver = "2"
 authors = ["Prism Contributors"]
 edition = "2024"
 license = "Apache-2.0"
-repository = "https://github.com/your-org/prism"
+repository = "https://github.com/boniface/prism"
 version = "0.1.0"
 
 [workspace.dependencies]

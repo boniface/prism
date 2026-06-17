@@ -1,0 +1,24 @@
+agent:
+  node_name: localhost
+  instance_id: prism-local
+
+bpf:
+  pin_path: /sys/fs/bpf/prism
+  ephemeral: true
+
+metadata:
+  providers:
+    - systemd
+
+prometheus:
+  listen_addr: 127.0.0.1:9090
+
+otlp:
+  endpoint: http://127.0.0.1:4317
+
+security:
+  capture_process_exec: true
+  capture_command_line: false
+
+logging:
+  level: info

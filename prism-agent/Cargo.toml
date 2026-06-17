@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+description = "Prism eBPF observability agent"
+readme = "../README.md"
 publish = false
 
 [dependencies]
@@ -27,3 +29,55 @@ tempfile.workspace = true
 [[bench]]
 name = "lifecycle"
 harness = false
+
+[package.metadata.deb]
+maintainer = "Prism Contributors"
+copyright = "2026, Prism Contributors"
+depends = "$auto"
+section = "admin"
+priority = "optional"
+assets = [
+    ["target/release/prism-agent", "usr/bin/", "755"],
+    ["../target/bpfel-unknown-none/release/prism-ebpf", "usr/lib/prism/prism-ebpf", "644"],
+    ["../config/example.yaml", "etc/prism/config.yaml", "644"],
+    ["../deploy/systemd/prism-agent.service", "lib/systemd/system/prism-agent.service", "644"],
+    ["../LICENSE", "usr/share/doc/prism-agent/LICENSE", "644"],
+    ["../README.md", "usr/share/doc/prism-agent/README.md", "644"],
+]
+
+[package.metadata.generate-rpm]
+summary = "Prism eBPF observability agent"
+release = "1"
+
+[[package.metadata.generate-rpm.assets]]
+source = "target/release/prism-agent"
+dest = "/usr/bin/prism-agent"
+mode = "0755"
+
+[[package.metadata.generate-rpm.assets]]
+source = "target/bpfel-unknown-none/release/prism-ebpf"
+dest = "/usr/lib/prism/prism-ebpf"
+mode = "0644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "config/example.yaml"
+dest = "/etc/prism/config.yaml"
+mode = "0644"
+config = "noreplace"
+
+[[package.metadata.generate-rpm.assets]]
+source = "deploy/systemd/prism-agent.service"
+dest = "/lib/systemd/system/prism-agent.service"
+mode = "0644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "LICENSE"
+dest = "/usr/share/doc/prism-agent/LICENSE"
+mode = "0644"
+doc = true
+
+[[package.metadata.generate-rpm.assets]]
+source = "README.md"
+dest = "/usr/share/doc/prism-agent/README.md"
+mode = "0644"
+doc = true

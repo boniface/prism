@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prism-agent-config
+  labels:
+    app.kubernetes.io/name: prism-agent
+data:
+  config.yaml: |
+    agent:
+      node_name: ${NODE_NAME}
+      instance_id: ${NODE_NAME}
+    bpf:
+      pin_path: /sys/fs/bpf/prism
+      ephemeral: true
+    metadata:
+      providers:
+        - {{ .Values.metadata.provider }}
+    prometheus:
+      listen_addr: 0.0.0.0:{{ .Values.prometheus.port }}
+    otlp:
+      endpoint: http://otel-collector:4317
+    security:
+      capture_process_exec: true
+      capture_command_line: false
+    logging:
+      level: info
