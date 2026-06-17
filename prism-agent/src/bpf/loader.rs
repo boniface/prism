@@ -167,8 +167,8 @@ mod tests {
             PathBuf::from("/tmp/prism-pins"),
         );
 
-        let error = LoadedBpf::load(&config).expect_err("missing object should fail");
+        let result = LoadedBpf::load(&config);
 
-        assert!(matches!(error, BpfLifecycleError::MissingObject(_)));
+        assert!(matches!(result, Err(BpfLifecycleError::MissingObject(_))));
     }
 }
