@@ -19,7 +19,10 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@nightly
         with:
-          components: clippy,rust-src
+          components: clippy,rustfmt,rust-src
+
+      - name: Use stable by default
+        run: rustup default stable
 
       - name: Install system tools
         run: |

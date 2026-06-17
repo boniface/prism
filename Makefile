@@ -1,8 +1,9 @@
 SHELL := /bin/sh
 
 CARGO ?= cargo
+STABLE ?= stable
 BPF_TARGET ?= bpfel-unknown-none
-HOST_TARGET ?= $(shell rustc -vV | sed -n 's/^host: //p')
+HOST_TARGET ?= $(shell rustc +$(STABLE) -vV | sed -n 's/^host: //p')
 USER_TARGET ?= $(HOST_TARGET)
 DIST_TARGET ?= x86_64-unknown-linux-musl
 NIGHTLY ?= nightly
@@ -24,36 +25,36 @@ setup:
 	./scripts/setup-dev.sh
 
 dev:
-	$(CARGO) build --workspace --exclude prism-ebpf
+	$(CARGO) +$(STABLE) build --workspace --exclude prism-ebpf
 
 fmt:
-	$(CARGO) fmt --all --check
+	$(CARGO) +$(STABLE) fmt --all --check
 
 lint:
-	$(CARGO) clippy --workspace --all-targets --all-features --exclude prism-ebpf -- -D warnings -W clippy::pedantic
+	$(CARGO) +$(STABLE) clippy --workspace --all-targets --all-features --exclude prism-ebpf -- -D warnings -W clippy::pedantic
 	$(EBPF_ENV) $(CARGO) +$(NIGHTLY) clippy -Z build-std=core -p prism-ebpf --target $(BPF_TARGET) -- -D warnings -W clippy::pedantic
 
 test:
-	$(CARGO) test --workspace --exclude prism-ebpf
+	$(CARGO) +$(STABLE) test --workspace --exclude prism-ebpf
 
 perf:
-	$(CARGO) bench -p prism-agent
+	$(CARGO) +$(STABLE) bench -p prism-agent
 
 ebpf:
 	$(EBPF_ENV) $(CARGO) +$(NIGHTLY) build -Z build-std=core -p prism-ebpf --release --target $(BPF_TARGET)
 
 build: ebpf
-	$(CARGO) build -p prism-agent --release $(USER_BUILD_ARGS)
+	$(CARGO) +$(STABLE) build -p prism-agent --release $(USER_BUILD_ARGS)
 
 audit:
 	if [ -d target/advisory-db/.git ]; then \
-		cargo audit --db target/advisory-db --no-fetch --stale; \
+		$(CARGO) +$(STABLE) audit --db target/advisory-db --no-fetch --stale; \
 	else \
-		cargo audit --db target/advisory-db; \
+		$(CARGO) +$(STABLE) audit --db target/advisory-db; \
 	fi
-	cargo deny check bans licenses sources
+	$(CARGO) +$(STABLE) deny check bans licenses sources
 
 ci: fmt lint test ebpf audit
 
 package: build
-	$(CARGO) build -p prism-agent --release --target $(DIST_TARGET)
+	$(CARGO) +$(STABLE) build -p prism-agent --release --target $(DIST_TARGET)
