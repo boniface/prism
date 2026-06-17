@@ -1,0 +1,16 @@
+[package]
+name = "prism-ebpf"
+version.workspace = true
+edition = "2021"
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+aya-ebpf.workspace = true
+prism-core = { path = "../prism-core", version = "0.1.0" }

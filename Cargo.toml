@@ -1,0 +1,32 @@
+[workspace]
+members = ["prism-agent", "prism-core", "prism-ebpf"]
+resolver = "2"
+
+[workspace.package]
+authors = ["Prism Contributors"]
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/your-org/prism"
+version = "0.1.0"
+
+[workspace.dependencies]
+anyhow = "1.0"
+async-trait = "0.1"
+aya = "0.13.1"
+aya-ebpf = "0.1.1"
+bytemuck = { version = "1.24", default-features = false, features = ["derive"] }
+tempfile = "3.23"
+thiserror = "2.0"
+tokio = { version = "1.48", features = ["fs", "macros", "rt-multi-thread", "signal", "sync"] }
+tokio-util = "0.7"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+panic = "abort"
+strip = "symbols"
