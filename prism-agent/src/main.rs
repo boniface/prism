@@ -10,7 +10,7 @@ use tracing::{error, info};
 async fn main() -> Result<()> {
     init_tracing()?;
 
-    let config = AgentConfig::from_env();
+    let config = AgentConfig::load().context("failed to load agent config")?;
     let cleanup = reconcile_stale_pins(config.bpf.pin_path.as_path())
         .context("failed to reconcile stale eBPF pins")?;
     info!(

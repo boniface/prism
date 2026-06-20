@@ -11,6 +11,7 @@ pub const LIFECYCLE_PROGRAM_NAME: &str = "prism_lifecycle";
 pub struct BpfLoaderConfig {
     pub object_path: PathBuf,
     pub pin_path: PathBuf,
+    pub ephemeral: bool,
     pub tracepoint_category: String,
     pub tracepoint_name: String,
 }
@@ -21,9 +22,16 @@ impl BpfLoaderConfig {
         Self {
             object_path,
             pin_path,
+            ephemeral: true,
             tracepoint_category: DEFAULT_TRACEPOINT_CATEGORY.to_owned(),
             tracepoint_name: DEFAULT_TRACEPOINT_NAME.to_owned(),
         }
+    }
+
+    #[must_use]
+    pub fn with_ephemeral(mut self, ephemeral: bool) -> Self {
+        self.ephemeral = ephemeral;
+        self
     }
 }
 
@@ -155,6 +163,7 @@ mod tests {
     fn config_uses_expected_tracepoint_defaults() {
         let config = BpfLoaderConfig::new(PathBuf::from("object"), PathBuf::from("pins"));
 
+        assert!(config.ephemeral);
         assert_eq!(config.tracepoint_category, "syscalls");
         assert_eq!(config.tracepoint_name, "sys_enter_nanosleep");
     }
