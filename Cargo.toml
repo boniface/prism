@@ -17,7 +17,7 @@ aya-ebpf = "0.1.1"
 bytemuck = { version = "1.24", default-features = false, features = ["derive"] }
 tempfile = "3.23"
 thiserror = "2.0"
-tokio = { version = "1.48", features = ["fs", "macros", "rt-multi-thread", "signal", "sync"] }
+tokio = { version = "1.48", features = ["fs", "macros", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = "0.7"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
