@@ -62,6 +62,13 @@ pub enum MetadataError {
         operation: &'static str,
         reason: &'static str,
     },
+    #[error("CRI socket is unavailable at {path}")]
+    CriUnavailable { path: PathBuf },
+    #[error("invalid CRI response for {operation}: {reason}")]
+    CriProtocol {
+        operation: &'static str,
+        reason: &'static str,
+    },
 }
 
 #[repr(transparent)]
