@@ -76,6 +76,15 @@ pub enum MetadataError {
         operation: &'static str,
         reason: &'static str,
     },
+    #[error("invalid systemd cgroup path {path}: {reason}")]
+    InvalidSystemdCgroupPath { path: PathBuf, reason: &'static str },
+    #[error("Uncloud metadata is unavailable: {reason}")]
+    UncloudUnavailable { reason: &'static str },
+    #[error("invalid Uncloud API response for {operation}: {reason}")]
+    UncloudProtocol {
+        operation: &'static str,
+        reason: &'static str,
+    },
 }
 
 #[repr(transparent)]

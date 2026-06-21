@@ -4,6 +4,7 @@ pub mod cri;
 pub mod docker;
 pub mod kubernetes;
 pub mod provider;
+pub mod systemd;
 
 pub use cache::{MetadataCache, MetadataCacheConfig, MetadataCacheCounters};
 pub use cgroup::{
@@ -17,3 +18,4 @@ pub use kubernetes::{
     KubernetesProvider,
 };
 pub use provider::{ContainerMeta, RuntimeEvent, RuntimeProvider};
+pub use systemd::{SystemdProvider, SystemdUnitMeta, UncloudCredentials, UncloudMeta};
