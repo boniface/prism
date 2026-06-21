@@ -1,0 +1,34 @@
+{{- if .Values.kubernetes.rbac.create }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: prism-agent
+  labels:
+    app.kubernetes.io/name: prism-agent
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+      - namespaces
+      - nodes
+    verbs:
+      - get
+      - list
+      - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: prism-agent
+  labels:
+    app.kubernetes.io/name: prism-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: prism-agent
+subjects:
+  - kind: ServiceAccount
+    name: prism-agent
+    namespace: {{ .Release.Namespace }}
+{{- end }}

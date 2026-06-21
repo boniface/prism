@@ -62,6 +62,13 @@ pub enum MetadataError {
         operation: &'static str,
         reason: &'static str,
     },
+    #[error("kubernetes API is unavailable: {reason}")]
+    KubernetesUnavailable { reason: &'static str },
+    #[error("invalid kubernetes API response for {operation}: {reason}")]
+    KubernetesProtocol {
+        operation: &'static str,
+        reason: &'static str,
+    },
 }
 
 #[repr(transparent)]
