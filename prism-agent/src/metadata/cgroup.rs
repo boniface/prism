@@ -43,6 +43,25 @@ pub enum MetadataError {
     },
     #[error("cgroup identity resolution requires Unix metadata support")]
     UnsupportedPlatform,
+    #[error("docker socket is unavailable at {path}")]
+    DockerUnavailable { path: PathBuf },
+    #[error("failed docker socket I/O for {operation}")]
+    DockerIo {
+        operation: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to decode docker response for {operation}")]
+    DockerDecode {
+        operation: &'static str,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("invalid docker response for {operation}: {reason}")]
+    DockerProtocol {
+        operation: &'static str,
+        reason: &'static str,
+    },
 }
 
 #[repr(transparent)]
