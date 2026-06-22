@@ -1,13 +1,74 @@
 use bytemuck::{Pod, Zeroable};
 
+pub const METRIC_COUNTER_FIELDS: usize = 14;
+
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Zeroable, Pod)]
+pub struct MetricCounters {
+    pub cpu_runtime_ns: u64,
+    pub memory_current_bytes: u64,
+    pub memory_limit_bytes: u64,
+    pub memory_pressure_some_total_us: u64,
+    pub memory_pressure_full_total_us: u64,
+    pub disk_read_bytes: u64,
+    pub disk_write_bytes: u64,
+    pub disk_read_ops: u64,
+    pub disk_write_ops: u64,
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+    pub rx_packets: u64,
+    pub tx_packets: u64,
+    pub drop_count: u64,
+}
+
+impl MetricCounters {
+    #[must_use]
+    pub const fn from_raw(raw: [u64; METRIC_COUNTER_FIELDS]) -> Self {
+        Self {
+            cpu_runtime_ns: raw[0],
+            memory_current_bytes: raw[1],
+            memory_limit_bytes: raw[2],
+            memory_pressure_some_total_us: raw[3],
+            memory_pressure_full_total_us: raw[4],
+            disk_read_bytes: raw[5],
+            disk_write_bytes: raw[6],
+            disk_read_ops: raw[7],
+            disk_write_ops: raw[8],
+            rx_bytes: raw[9],
+            tx_bytes: raw[10],
+            rx_packets: raw[11],
+            tx_packets: raw[12],
+            drop_count: raw[13],
+        }
+    }
+
+    #[must_use]
+    pub const fn into_raw(self) -> [u64; METRIC_COUNTER_FIELDS] {
+        [
+            self.cpu_runtime_ns,
+            self.memory_current_bytes,
+            self.memory_limit_bytes,
+            self.memory_pressure_some_total_us,
+            self.memory_pressure_full_total_us,
+            self.disk_read_bytes,
+            self.disk_write_bytes,
+            self.disk_read_ops,
+            self.disk_write_ops,
+            self.rx_bytes,
+            self.tx_bytes,
+            self.rx_packets,
+            self.tx_packets,
+            self.drop_count,
+        ]
+    }
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Zeroable, Pod)]
 pub struct MetricEvent {
     pub cgroup_id: u64,
     pub timestamp_ns: u64,
-    pub cpu_runtime_ns: u64,
-    pub rx_bytes: u64,
-    pub tx_bytes: u64,
+    pub counters: MetricCounters,
 }
 
 #[cfg(test)]
@@ -17,8 +78,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn metric_counters_have_stable_layout() {
+        assert_eq!(
+            size_of::<MetricCounters>(),
+            METRIC_COUNTER_FIELDS * size_of::<u64>()
+        );
+        assert_eq!(align_of::<MetricCounters>(), align_of::<u64>());
+    }
+
+    #[test]
     fn metric_event_has_stable_layout() {
-        assert_eq!(size_of::<MetricEvent>(), 40);
+        assert_eq!(size_of::<MetricEvent>(), 128);
         assert_eq!(align_of::<MetricEvent>(), 8);
+    }
+
+    #[test]
+    fn metric_counters_round_trip_raw_layout() {
+        let raw = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14];
+        let counters = MetricCounters::from_raw(raw);
+
+        assert_eq!(counters.into_raw(), raw);
     }
 }
