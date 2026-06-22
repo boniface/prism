@@ -1,11 +1,11 @@
 use std::{path::PathBuf, str::FromStr};
-
 use thiserror::Error;
 
 pub const DEFAULT_TRACEPOINT_CATEGORY: &str = "syscalls";
 pub const DEFAULT_TRACEPOINT_NAME: &str = "sys_enter_nanosleep";
 pub const LIFECYCLE_MAP_NAME: &str = "LIFECYCLE_COUNTER";
 pub const LIFECYCLE_PROGRAM_NAME: &str = "prism_lifecycle";
+pub const EXECVE_PROGRAM_NAME: &str = "prism_execve";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BpfLoaderConfig {
@@ -60,7 +60,10 @@ pub enum BpfLifecycleError {
 mod linux {
     use aya::{Ebpf, maps::Array, programs::TracePoint};
 
-    use super::{BpfLifecycleError, BpfLoaderConfig, LIFECYCLE_MAP_NAME, LIFECYCLE_PROGRAM_NAME};
+    use super::{
+        BpfLifecycleError, BpfLoaderConfig, EXECVE_PROGRAM_NAME, LIFECYCLE_MAP_NAME,
+        LIFECYCLE_PROGRAM_NAME,
+    };
 
     pub struct LoadedBpf {
         ebpf: Ebpf,
@@ -82,6 +85,7 @@ mod linux {
             let mut ebpf =
                 Ebpf::load_file(&config.object_path).map_err(BpfLifecycleError::LoadObject)?;
             attach_lifecycle_program(&mut ebpf, config)?;
+            attach_execve_program(&mut ebpf)?;
             initialize_lifecycle_map(&mut ebpf)?;
 
             Ok(Self { ebpf })
@@ -89,6 +93,10 @@ mod linux {
 
         pub fn shutdown(self) {
             drop(self.ebpf);
+        }
+
+        pub fn ebpf_mut(&mut self) -> &mut Ebpf {
+            &mut self.ebpf
         }
     }
 
@@ -102,6 +110,16 @@ mod linux {
         let tracepoint: &mut TracePoint = program.try_into()?;
         tracepoint.load()?;
         tracepoint.attach(&config.tracepoint_category, &config.tracepoint_name)?;
+        Ok(())
+    }
+
+    fn attach_execve_program(ebpf: &mut Ebpf) -> Result<(), BpfLifecycleError> {
+        let program = ebpf
+            .program_mut(EXECVE_PROGRAM_NAME)
+            .ok_or(BpfLifecycleError::MissingProgram(EXECVE_PROGRAM_NAME))?;
+        let tracepoint: &mut TracePoint = program.try_into()?;
+        tracepoint.load()?;
+        tracepoint.attach("syscalls", "sys_enter_execve")?;
         Ok(())
     }
 
