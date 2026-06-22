@@ -1,6 +1,6 @@
 use std::{
+    collections::HashSet,
     fmt::Write as _,
-    net::SocketAddr,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -17,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     bpf::{BpfLifecycleError, LoadedBpf},
+    config::{PrometheusLabel, PrometheusSettings},
     metrics::MetricSnapshot,
 };
 
@@ -72,15 +73,19 @@ impl MetricSnapshotSource for StaticMetricSource {
 
 pub struct PrometheusExporter {
     source: Arc<dyn MetricSnapshotSource>,
+    controls: CardinalityControls,
+    series: SeriesTracker,
     started_at: Instant,
     scrape_count: AtomicU64,
 }
 
 impl PrometheusExporter {
     #[must_use]
-    pub fn new(source: Arc<dyn MetricSnapshotSource>) -> Self {
+    pub fn new(source: Arc<dyn MetricSnapshotSource>, settings: &PrometheusSettings) -> Self {
         Self {
             source,
+            controls: CardinalityControls::from(settings),
+            series: SeriesTracker::new(settings.series_limit),
             started_at: Instant::now(),
             scrape_count: AtomicU64::new(0),
         }
@@ -102,9 +107,72 @@ impl PrometheusExporter {
             self.started_at.elapsed().as_secs(),
         );
         for snapshot in &snapshots {
-            render_snapshot(&mut output, snapshot);
+            self.render_snapshot(&mut output, snapshot);
         }
+        render_cardinality_metrics(&mut output, &self.series);
         Ok(output)
+    }
+
+    fn render_snapshot(&self, output: &mut String, snapshot: &MetricSnapshot) {
+        let labels = self.controls.labels_for(snapshot);
+        let counters = snapshot.counters();
+
+        self.render_metric(
+            output,
+            "prism_cgroup_cpu_runtime_ns",
+            &labels,
+            counters.cpu_runtime_ns,
+        );
+        self.render_metric(
+            output,
+            "prism_cgroup_memory_current_bytes",
+            &labels,
+            counters.memory_current_bytes,
+        );
+        self.render_metric(
+            output,
+            "prism_cgroup_memory_limit_bytes",
+            &labels,
+            counters.memory_limit_bytes,
+        );
+        self.render_metric(
+            output,
+            "prism_cgroup_disk_read_bytes",
+            &labels,
+            counters.disk_read_bytes,
+        );
+        self.render_metric(
+            output,
+            "prism_cgroup_disk_write_bytes",
+            &labels,
+            counters.disk_write_bytes,
+        );
+        self.render_metric(output, "prism_cgroup_rx_bytes", &labels, counters.rx_bytes);
+        self.render_metric(output, "prism_cgroup_tx_bytes", &labels, counters.tx_bytes);
+        self.render_metric(
+            output,
+            "prism_cgroup_rx_packets",
+            &labels,
+            counters.rx_packets,
+        );
+        self.render_metric(
+            output,
+            "prism_cgroup_tx_packets",
+            &labels,
+            counters.tx_packets,
+        );
+        self.render_metric(
+            output,
+            "prism_cgroup_drops_total",
+            &labels,
+            counters.drop_count,
+        );
+    }
+
+    fn render_metric(&self, output: &mut String, name: &str, labels: &str, value: u64) {
+        if self.series.allow(name, labels) {
+            let _ = writeln!(output, "{name}{labels} {value}");
+        }
     }
 }
 
@@ -120,15 +188,15 @@ impl PrometheusServer {
     ///
     /// Returns an error when the listener cannot bind the requested address.
     pub async fn bind(
-        listen_addr: SocketAddr,
+        settings: &PrometheusSettings,
         source: Arc<dyn MetricSnapshotSource>,
     ) -> Result<Self, PrometheusError> {
-        let listener = TcpListener::bind(listen_addr)
+        let listener = TcpListener::bind(settings.listen_addr)
             .await
             .map_err(PrometheusError::Bind)?;
         Ok(Self {
             listener,
-            exporter: Arc::new(PrometheusExporter::new(source)),
+            exporter: Arc::new(PrometheusExporter::new(source, settings)),
         })
     }
 
@@ -155,7 +223,7 @@ impl PrometheusServer {
     }
 
     #[cfg(test)]
-    fn local_addr(&self) -> SocketAddr {
+    fn local_addr(&self) -> std::net::SocketAddr {
         self.listener
             .local_addr()
             .expect("bound listener should have a local address")
@@ -190,71 +258,123 @@ fn render_self_metrics(output: &mut String, scrape_count: u64, uptime_seconds: u
     let _ = writeln!(output, "prism_agent_scrapes_total {scrape_count}");
 }
 
-fn render_snapshot(output: &mut String, snapshot: &MetricSnapshot) {
-    let cgroup_id = snapshot.cgroup_id().value();
-    let labels = format!(
-        "{{cgroup_id=\"{}\"}}",
-        sanitize_label_value(&cgroup_id.to_string())
-    );
-    let counters = snapshot.counters();
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CardinalityControls {
+    label_allowlist: Vec<PrometheusLabel>,
+    max_label_value_len: usize,
+    expensive_dimensions_enabled: bool,
+}
 
-    render_metric(
+impl CardinalityControls {
+    fn labels_for(&self, snapshot: &MetricSnapshot) -> String {
+        let labels = self
+            .label_allowlist
+            .iter()
+            .filter(|label| self.expensive_dimensions_enabled || !label.is_high_cardinality())
+            .filter_map(|label| {
+                label_value(*label, snapshot).map(|value| {
+                    format!(
+                        "{}=\"{}\"",
+                        label.name(),
+                        sanitize_label_value(&value, self.max_label_value_len)
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+
+        if labels.is_empty() {
+            return String::new();
+        }
+
+        format!("{{{}}}", labels.join(","))
+    }
+}
+
+impl From<&PrometheusSettings> for CardinalityControls {
+    fn from(settings: &PrometheusSettings) -> Self {
+        Self {
+            label_allowlist: settings.label_allowlist.clone(),
+            max_label_value_len: settings.max_label_value_len,
+            expensive_dimensions_enabled: settings.expensive_dimensions_enabled,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct SeriesTracker {
+    limit: usize,
+    active: Mutex<HashSet<String>>,
+    dropped: AtomicU64,
+}
+
+impl SeriesTracker {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            active: Mutex::new(HashSet::with_capacity(limit.min(1024))),
+            dropped: AtomicU64::new(0),
+        }
+    }
+
+    fn allow(&self, name: &str, labels: &str) -> bool {
+        let key = format!("{name}{labels}");
+        let Ok(mut active) = self.active.lock() else {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+            return false;
+        };
+
+        if active.contains(&key) {
+            return true;
+        }
+
+        if active.len() >= self.limit {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+
+        active.insert(key);
+        true
+    }
+
+    fn active_count(&self) -> usize {
+        self.active.lock().map_or(0, |active| active.len())
+    }
+
+    fn dropped_count(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
+}
+
+fn render_cardinality_metrics(output: &mut String, series: &SeriesTracker) {
+    output.push_str("# HELP prism_metric_series_active Active Prometheus metric series.\n");
+    output.push_str("# TYPE prism_metric_series_active gauge\n");
+    let _ = writeln!(
         output,
-        "prism_cgroup_cpu_runtime_ns",
-        &labels,
-        counters.cpu_runtime_ns,
+        "prism_metric_series_active {}",
+        series.active_count()
     );
-    render_metric(
-        output,
-        "prism_cgroup_memory_current_bytes",
-        &labels,
-        counters.memory_current_bytes,
+    output.push_str(
+        "# HELP prism_metric_series_dropped_total Metric series dropped by cardinality controls.\n",
     );
-    render_metric(
+    output.push_str("# TYPE prism_metric_series_dropped_total counter\n");
+    let _ = writeln!(
         output,
-        "prism_cgroup_memory_limit_bytes",
-        &labels,
-        counters.memory_limit_bytes,
-    );
-    render_metric(
-        output,
-        "prism_cgroup_disk_read_bytes",
-        &labels,
-        counters.disk_read_bytes,
-    );
-    render_metric(
-        output,
-        "prism_cgroup_disk_write_bytes",
-        &labels,
-        counters.disk_write_bytes,
-    );
-    render_metric(output, "prism_cgroup_rx_bytes", &labels, counters.rx_bytes);
-    render_metric(output, "prism_cgroup_tx_bytes", &labels, counters.tx_bytes);
-    render_metric(
-        output,
-        "prism_cgroup_rx_packets",
-        &labels,
-        counters.rx_packets,
-    );
-    render_metric(
-        output,
-        "prism_cgroup_tx_packets",
-        &labels,
-        counters.tx_packets,
-    );
-    render_metric(
-        output,
-        "prism_cgroup_drops_total",
-        &labels,
-        counters.drop_count,
+        "prism_metric_series_dropped_total {}",
+        series.dropped_count()
     );
 }
 
-fn render_metric(output: &mut String, name: &str, labels: &str, value: u64) {
-    let _ = writeln!(output, "{name}{labels} {value}");
+fn label_value(label: PrometheusLabel, snapshot: &MetricSnapshot) -> Option<String> {
+    match label {
+        PrometheusLabel::CgroupId => Some(snapshot.cgroup_id().value().to_string()),
+        PrometheusLabel::ContainerId
+        | PrometheusLabel::ContainerName
+        | PrometheusLabel::Namespace
+        | PrometheusLabel::PodName => None,
+    }
 }
 
-fn sanitize_label_value(value: &str) -> String {
+fn sanitize_label_value(value: &str, max_len: usize) -> String {
     value
         .chars()
         .filter_map(|character| match character {
@@ -263,7 +383,7 @@ fn sanitize_label_value(value: &str) -> String {
             character if character.is_control() => None,
             character => Some(character),
         })
-        .take(128)
+        .take(max_len)
         .collect()
 }
 
@@ -320,9 +440,13 @@ mod tests {
         let mut counters = MetricCounters::default();
         counters.add_cpu_runtime(42);
         counters.add_network_rx(100, 2);
-        let exporter = PrometheusExporter::new(Arc::new(StaticMetricSource::new(vec![
-            MetricSnapshot::new(CgroupId::new(7), counters),
-        ])));
+        let exporter = PrometheusExporter::new(
+            Arc::new(StaticMetricSource::new(vec![MetricSnapshot::new(
+                CgroupId::new(7),
+                counters,
+            )])),
+            &PrometheusSettings::default(),
+        );
 
         let output = exporter.render().expect("metrics should render");
 
@@ -330,22 +454,49 @@ mod tests {
         assert!(output.contains("prism_cgroup_cpu_runtime_ns{cgroup_id=\"7\"} 42\n"));
         assert!(output.contains("prism_cgroup_rx_bytes{cgroup_id=\"7\"} 100\n"));
         assert!(!output.contains("container_name"));
+        assert!(output.contains("prism_metric_series_active 10\n"));
+        assert!(output.contains("prism_metric_series_dropped_total 0\n"));
     }
 
     #[test]
     fn label_values_are_sanitized_and_bounded() {
-        let value = sanitize_label_value("abc\"\\\n\t");
+        let value = sanitize_label_value("abc\"\\\n\tdef", 5);
 
         assert_eq!(value, "abc__");
+    }
+
+    #[test]
+    fn series_limit_drops_excess_infrastructure_series() {
+        let settings = PrometheusSettings {
+            series_limit: 1,
+            ..PrometheusSettings::default()
+        };
+        let exporter = PrometheusExporter::new(
+            Arc::new(StaticMetricSource::new(vec![MetricSnapshot::new(
+                CgroupId::new(7),
+                MetricCounters::default(),
+            )])),
+            &settings,
+        );
+
+        let output = exporter.render().expect("metrics should render");
+
+        assert!(output.contains("prism_cgroup_cpu_runtime_ns{cgroup_id=\"7\"} 0\n"));
+        assert!(!output.contains("prism_cgroup_memory_current_bytes{cgroup_id=\"7\"}"));
+        assert!(output.contains("prism_metric_series_active 1\n"));
+        assert!(output.contains("prism_metric_series_dropped_total 9\n"));
     }
 
     #[tokio::test]
     async fn metrics_endpoint_serves_prometheus_text() {
         let source = Arc::new(StaticMetricSource::new(Vec::new()));
-        let server =
-            PrometheusServer::bind("127.0.0.1:0".parse().expect("addr should parse"), source)
-                .await
-                .expect("server should bind");
+        let settings = PrometheusSettings {
+            listen_addr: "127.0.0.1:0".parse().expect("addr should parse"),
+            ..PrometheusSettings::default()
+        };
+        let server = PrometheusServer::bind(&settings, source)
+            .await
+            .expect("server should bind");
         let addr = server.local_addr();
         let shutdown = CancellationToken::new();
         let task = tokio::spawn(server.run(shutdown.clone()));
