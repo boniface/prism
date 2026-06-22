@@ -15,6 +15,11 @@ data:
     metadata:
       providers:
         - {{ .Values.metadata.provider }}
+      kubernetes:
+        labels_allowlist:
+{{ toYaml .Values.kubernetes.labelsAllowlist | indent 10 }}
+        annotations_allowlist:
+{{ toYaml .Values.kubernetes.annotationsAllowlist | indent 10 }}
     prometheus:
       listen_addr: 0.0.0.0:{{ .Values.prometheus.port }}
     otlp:

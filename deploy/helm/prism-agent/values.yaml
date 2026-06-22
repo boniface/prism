@@ -10,6 +10,16 @@ metadata:
   provider: cri
   criSocketPath: /run/containerd/containerd.sock
 
+kubernetes:
+  rbac:
+    create: true
+  labelsAllowlist:
+    - app.kubernetes.io/name
+    - app.kubernetes.io/instance
+    - app.kubernetes.io/component
+  annotationsAllowlist:
+    - prism.io/workload
+
 resources:
   requests:
     cpu: 100m

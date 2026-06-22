@@ -62,6 +62,13 @@ pub enum MetadataError {
         operation: &'static str,
         reason: &'static str,
     },
+    #[error("kubernetes API is unavailable: {reason}")]
+    KubernetesUnavailable { reason: &'static str },
+    #[error("invalid kubernetes API response for {operation}: {reason}")]
+    KubernetesProtocol {
+        operation: &'static str,
+        reason: &'static str,
+    },
     #[error("CRI socket is unavailable at {path}")]
     CriUnavailable { path: PathBuf },
     #[error("invalid CRI response for {operation}: {reason}")]
