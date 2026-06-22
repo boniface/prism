@@ -65,6 +65,19 @@ impl MetricCounters {
     pub fn add_cpu_runtime(&mut self, delta_ns: u64) {
         self.cpu_runtime_ns = self.cpu_runtime_ns.saturating_add(delta_ns);
     }
+
+    pub fn set_memory(
+        &mut self,
+        current_bytes: u64,
+        limit_bytes: u64,
+        pressure_some_total_us: u64,
+        pressure_full_total_us: u64,
+    ) {
+        self.memory_current_bytes = current_bytes;
+        self.memory_limit_bytes = limit_bytes;
+        self.memory_pressure_some_total_us = pressure_some_total_us;
+        self.memory_pressure_full_total_us = pressure_full_total_us;
+    }
 }
 
 #[repr(C)]
@@ -114,5 +127,17 @@ mod tests {
         counters.add_cpu_runtime(7);
 
         assert_eq!(counters.cpu_runtime_ns, u64::MAX);
+    }
+
+    #[test]
+    fn memory_counters_are_updated_together() {
+        let mut counters = MetricCounters::default();
+
+        counters.set_memory(128, 256, 7, 3);
+
+        assert_eq!(counters.memory_current_bytes, 128);
+        assert_eq!(counters.memory_limit_bytes, 256);
+        assert_eq!(counters.memory_pressure_some_total_us, 7);
+        assert_eq!(counters.memory_pressure_full_total_us, 3);
     }
 }
