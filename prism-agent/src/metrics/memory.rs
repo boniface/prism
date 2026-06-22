@@ -71,7 +71,7 @@ struct PressureTotals {
     full_total_us: u64,
 }
 
-fn relative_cgroup_path(cgroup_path: &CgroupV2Path) -> &Path {
+pub(crate) fn relative_cgroup_path(cgroup_path: &CgroupV2Path) -> &Path {
     cgroup_path
         .as_path()
         .strip_prefix(Path::new("/"))

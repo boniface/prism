@@ -78,6 +78,19 @@ impl MetricCounters {
         self.memory_pressure_some_total_us = pressure_some_total_us;
         self.memory_pressure_full_total_us = pressure_full_total_us;
     }
+
+    pub fn set_disk_io(
+        &mut self,
+        read_bytes: u64,
+        write_bytes: u64,
+        read_ops: u64,
+        write_ops: u64,
+    ) {
+        self.disk_read_bytes = read_bytes;
+        self.disk_write_bytes = write_bytes;
+        self.disk_read_ops = read_ops;
+        self.disk_write_ops = write_ops;
+    }
 }
 
 #[repr(C)]
@@ -139,5 +152,17 @@ mod tests {
         assert_eq!(counters.memory_limit_bytes, 256);
         assert_eq!(counters.memory_pressure_some_total_us, 7);
         assert_eq!(counters.memory_pressure_full_total_us, 3);
+    }
+
+    #[test]
+    fn disk_io_counters_are_updated_together() {
+        let mut counters = MetricCounters::default();
+
+        counters.set_disk_io(10, 20, 3, 4);
+
+        assert_eq!(counters.disk_read_bytes, 10);
+        assert_eq!(counters.disk_write_bytes, 20);
+        assert_eq!(counters.disk_read_ops, 3);
+        assert_eq!(counters.disk_write_ops, 4);
     }
 }
