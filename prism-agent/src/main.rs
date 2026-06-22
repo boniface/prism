@@ -27,7 +27,7 @@ async fn main() -> Result<()> {
         LoadedBpf::load(&config.bpf).context("failed to load eBPF programs")?
     };
     let metrics_source: Arc<dyn MetricSnapshotSource> = Arc::new(BpfMetricSource::new(loaded_bpf));
-    let prometheus = PrometheusServer::bind(config.prometheus.listen_addr, metrics_source)
+    let prometheus = PrometheusServer::bind(&config.prometheus, metrics_source)
         .await
         .context("failed to bind prometheus exporter")?;
     let shutdown = CancellationToken::new();
