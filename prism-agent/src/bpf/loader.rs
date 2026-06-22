@@ -4,8 +4,10 @@ use thiserror::Error;
 
 pub const DEFAULT_TRACEPOINT_CATEGORY: &str = "syscalls";
 pub const DEFAULT_TRACEPOINT_NAME: &str = "sys_enter_nanosleep";
+pub const CGROUP_METRICS_MAP_NAME: &str = "CGROUP_METRICS";
 pub const LIFECYCLE_MAP_NAME: &str = "LIFECYCLE_COUNTER";
 pub const LIFECYCLE_PROGRAM_NAME: &str = "prism_lifecycle";
+pub const METRIC_RING_DROPS_MAP_NAME: &str = "METRIC_RING_DROPS";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BpfLoaderConfig {
@@ -58,9 +60,14 @@ pub enum BpfLifecycleError {
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use aya::{Ebpf, maps::Array, programs::TracePoint};
+    use aya::{Ebpf, maps::Array, maps::HashMap as BpfHashMap, programs::TracePoint};
+    use prism_core::events::metrics::METRIC_COUNTER_FIELDS;
 
-    use super::{BpfLifecycleError, BpfLoaderConfig, LIFECYCLE_MAP_NAME, LIFECYCLE_PROGRAM_NAME};
+    use super::{
+        BpfLifecycleError, BpfLoaderConfig, CGROUP_METRICS_MAP_NAME, LIFECYCLE_MAP_NAME,
+        LIFECYCLE_PROGRAM_NAME, METRIC_RING_DROPS_MAP_NAME,
+    };
+    use crate::metrics::MetricSnapshot;
 
     pub struct LoadedBpf {
         ebpf: Ebpf,
@@ -90,6 +97,28 @@ mod linux {
         pub fn shutdown(self) {
             drop(self.ebpf);
         }
+
+        /// Reads a point-in-time copy of the kernel per-cgroup metric map.
+        ///
+        /// # Errors
+        ///
+        /// Returns an error when the metric map is missing or cannot be read.
+        pub fn metric_snapshots(&self) -> Result<Vec<MetricSnapshot>, BpfLifecycleError> {
+            let map = self
+                .ebpf
+                .map(CGROUP_METRICS_MAP_NAME)
+                .ok_or(BpfLifecycleError::MissingMap(CGROUP_METRICS_MAP_NAME))?;
+            let metrics = BpfHashMap::<_, u64, [u64; METRIC_COUNTER_FIELDS]>::try_from(map)?;
+
+            metrics
+                .iter()
+                .map(|entry| {
+                    entry
+                        .map(|(cgroup_id, raw)| MetricSnapshot::from_raw(cgroup_id, raw))
+                        .map_err(BpfLifecycleError::Map)
+                })
+                .collect()
+        }
     }
 
     fn attach_lifecycle_program(
@@ -111,6 +140,12 @@ mod linux {
             .ok_or(BpfLifecycleError::MissingMap(LIFECYCLE_MAP_NAME))?;
         let mut lifecycle_counter = Array::<_, u64>::try_from(map)?;
         lifecycle_counter.set(0, 0, 0)?;
+
+        let map = ebpf
+            .map_mut(METRIC_RING_DROPS_MAP_NAME)
+            .ok_or(BpfLifecycleError::MissingMap(METRIC_RING_DROPS_MAP_NAME))?;
+        let mut metric_ring_drops = Array::<_, u64>::try_from(map)?;
+        metric_ring_drops.set(0, 0, 0)?;
         Ok(())
     }
 }
@@ -134,6 +169,18 @@ mod non_linux {
         }
 
         pub fn shutdown(self) {}
+
+        /// Reports that kernel metric maps cannot be read on non-Linux hosts.
+        ///
+        /// # Errors
+        ///
+        /// Always returns [`BpfLifecycleError::UnsupportedPlatform`] outside
+        /// Linux.
+        pub fn metric_snapshots(
+            &self,
+        ) -> Result<Vec<crate::metrics::MetricSnapshot>, BpfLifecycleError> {
+            Err(BpfLifecycleError::UnsupportedPlatform)
+        }
     }
 }
 
