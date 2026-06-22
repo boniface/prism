@@ -8,8 +8,10 @@ pub const CGROUP_METRICS_MAP_NAME: &str = "CGROUP_METRICS";
 pub const CPU_SCHED_PROGRAM_NAME: &str = "prism_sched_switch";
 pub const CPU_SCHED_TRACEPOINT_CATEGORY: &str = "sched";
 pub const CPU_SCHED_TRACEPOINT_NAME: &str = "sched_switch";
+pub const INGRESS_TC_PROGRAM_NAME: &str = "prism_tc_ingress";
 pub const LIFECYCLE_MAP_NAME: &str = "LIFECYCLE_COUNTER";
 pub const LIFECYCLE_PROGRAM_NAME: &str = "prism_lifecycle";
+pub const EGRESS_TC_PROGRAM_NAME: &str = "prism_tc_egress";
 pub const METRIC_RING_DROPS_MAP_NAME: &str = "METRIC_RING_DROPS";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,13 +65,19 @@ pub enum BpfLifecycleError {
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use aya::{Ebpf, maps::Array, maps::HashMap as BpfHashMap, programs::TracePoint};
+    use aya::{
+        Ebpf,
+        maps::Array,
+        maps::HashMap as BpfHashMap,
+        programs::{SchedClassifier, TcAttachType, TracePoint},
+    };
     use prism_core::events::metrics::METRIC_COUNTER_FIELDS;
 
     use super::{
         BpfLifecycleError, BpfLoaderConfig, CGROUP_METRICS_MAP_NAME, CPU_SCHED_PROGRAM_NAME,
-        CPU_SCHED_TRACEPOINT_CATEGORY, CPU_SCHED_TRACEPOINT_NAME, LIFECYCLE_MAP_NAME,
-        LIFECYCLE_PROGRAM_NAME, METRIC_RING_DROPS_MAP_NAME,
+        CPU_SCHED_TRACEPOINT_CATEGORY, CPU_SCHED_TRACEPOINT_NAME, EGRESS_TC_PROGRAM_NAME,
+        INGRESS_TC_PROGRAM_NAME, LIFECYCLE_MAP_NAME, LIFECYCLE_PROGRAM_NAME,
+        METRIC_RING_DROPS_MAP_NAME,
     };
     use crate::metrics::MetricSnapshot;
 
@@ -86,6 +94,27 @@ mod linux {
         /// Returns an error when the object file is missing, the object cannot
         /// be loaded, the program or map cannot be found, or attachment fails.
         pub fn load(config: &BpfLoaderConfig) -> Result<Self, BpfLifecycleError> {
+            Self::load_inner(config, &[])
+        }
+
+        /// Loads the eBPF programs and attaches optional TC network hooks to
+        /// the provided interfaces.
+        ///
+        /// # Errors
+        ///
+        /// Returns an error when the object file is missing, programs or maps
+        /// cannot be loaded, or TC attachment fails.
+        pub fn load_with_tc_hooks(
+            config: &BpfLoaderConfig,
+            interfaces: &[String],
+        ) -> Result<Self, BpfLifecycleError> {
+            Self::load_inner(config, interfaces)
+        }
+
+        fn load_inner(
+            config: &BpfLoaderConfig,
+            tc_interfaces: &[String],
+        ) -> Result<Self, BpfLifecycleError> {
             if !config.object_path.exists() {
                 return Err(BpfLifecycleError::MissingObject(config.object_path.clone()));
             }
@@ -98,6 +127,18 @@ mod linux {
                 CPU_SCHED_PROGRAM_NAME,
                 CPU_SCHED_TRACEPOINT_CATEGORY,
                 CPU_SCHED_TRACEPOINT_NAME,
+            )?;
+            attach_tc_program(
+                &mut ebpf,
+                INGRESS_TC_PROGRAM_NAME,
+                tc_interfaces,
+                TcAttachType::Ingress,
+            )?;
+            attach_tc_program(
+                &mut ebpf,
+                EGRESS_TC_PROGRAM_NAME,
+                tc_interfaces,
+                TcAttachType::Egress,
             )?;
             initialize_lifecycle_map(&mut ebpf)?;
 
@@ -182,6 +223,27 @@ mod linux {
         metric_ring_drops.set(0, 0, 0)?;
         Ok(())
     }
+
+    fn attach_tc_program(
+        ebpf: &mut Ebpf,
+        program_name: &'static str,
+        interfaces: &[String],
+        attach_type: TcAttachType,
+    ) -> Result<(), BpfLifecycleError> {
+        if interfaces.is_empty() {
+            return Ok(());
+        }
+
+        let program = ebpf
+            .program_mut(program_name)
+            .ok_or(BpfLifecycleError::MissingProgram(program_name))?;
+        let classifier: &mut SchedClassifier = program.try_into()?;
+        classifier.load()?;
+        for interface in interfaces {
+            classifier.attach(interface, attach_type)?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -199,6 +261,19 @@ mod non_linux {
         /// Always returns [`BpfLifecycleError::UnsupportedPlatform`] outside
         /// Linux.
         pub fn load(_config: &BpfLoaderConfig) -> Result<Self, BpfLifecycleError> {
+            Err(BpfLifecycleError::UnsupportedPlatform)
+        }
+
+        /// Reports that eBPF TC hooks cannot run on non-Linux hosts.
+        ///
+        /// # Errors
+        ///
+        /// Always returns [`BpfLifecycleError::UnsupportedPlatform`] outside
+        /// Linux.
+        pub fn load_with_tc_hooks(
+            _config: &BpfLoaderConfig,
+            _interfaces: &[String],
+        ) -> Result<Self, BpfLifecycleError> {
             Err(BpfLifecycleError::UnsupportedPlatform)
         }
 
@@ -254,6 +329,12 @@ mod tests {
         assert_eq!(CPU_SCHED_PROGRAM_NAME, "prism_sched_switch");
         assert_eq!(CPU_SCHED_TRACEPOINT_CATEGORY, "sched");
         assert_eq!(CPU_SCHED_TRACEPOINT_NAME, "sched_switch");
+    }
+
+    #[test]
+    fn network_tc_program_names_match_kernel_symbols() {
+        assert_eq!(INGRESS_TC_PROGRAM_NAME, "prism_tc_ingress");
+        assert_eq!(EGRESS_TC_PROGRAM_NAME, "prism_tc_egress");
     }
 
     #[cfg(target_os = "linux")]

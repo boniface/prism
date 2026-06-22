@@ -91,6 +91,20 @@ impl MetricCounters {
         self.disk_read_ops = read_ops;
         self.disk_write_ops = write_ops;
     }
+
+    pub fn add_network_rx(&mut self, bytes: u64, packets: u64) {
+        self.rx_bytes = self.rx_bytes.saturating_add(bytes);
+        self.rx_packets = self.rx_packets.saturating_add(packets);
+    }
+
+    pub fn add_network_tx(&mut self, bytes: u64, packets: u64) {
+        self.tx_bytes = self.tx_bytes.saturating_add(bytes);
+        self.tx_packets = self.tx_packets.saturating_add(packets);
+    }
+
+    pub fn add_drop(&mut self, count: u64) {
+        self.drop_count = self.drop_count.saturating_add(count);
+    }
 }
 
 #[repr(C)]
@@ -164,5 +178,23 @@ mod tests {
         assert_eq!(counters.disk_write_bytes, 20);
         assert_eq!(counters.disk_read_ops, 3);
         assert_eq!(counters.disk_write_ops, 4);
+    }
+
+    #[test]
+    fn network_counters_are_monotonic_and_saturating() {
+        let mut counters = MetricCounters {
+            rx_bytes: u64::MAX - 1,
+            ..MetricCounters::default()
+        };
+
+        counters.add_network_rx(5, 2);
+        counters.add_network_tx(8, 1);
+        counters.add_drop(3);
+
+        assert_eq!(counters.rx_bytes, u64::MAX);
+        assert_eq!(counters.rx_packets, 2);
+        assert_eq!(counters.tx_bytes, 8);
+        assert_eq!(counters.tx_packets, 1);
+        assert_eq!(counters.drop_count, 3);
     }
 }

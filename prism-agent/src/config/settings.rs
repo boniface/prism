@@ -21,6 +21,8 @@ const ENV_EBPF_OBJECT: &str = "PRISM_EBPF_OBJECT";
 const ENV_BPF_PIN_PATH: &str = "PRISM_BPF_PIN_PATH";
 const ENV_BPF_EPHEMERAL: &str = "PRISM_BPF_EPHEMERAL";
 const ENV_PROMETHEUS_LISTEN_ADDR: &str = "PRISM_PROMETHEUS_LISTEN_ADDR";
+const ENV_NETWORK_TC_HOOKS_ENABLED: &str = "PRISM_NETWORK_TC_HOOKS_ENABLED";
+const ENV_NETWORK_TC_INTERFACES: &str = "PRISM_NETWORK_TC_INTERFACES";
 const ENV_OTLP_ENDPOINT: &str = "PRISM_OTLP_ENDPOINT";
 const ENV_LOG_LEVEL: &str = "PRISM_LOG_LEVEL";
 const ENV_CAPTURE_PROCESS_EXEC: &str = "PRISM_CAPTURE_PROCESS_EXEC";
@@ -31,6 +33,7 @@ pub struct AgentConfig {
     pub agent: AgentSettings,
     pub bpf: BpfLoaderConfig,
     pub metadata: MetadataSettings,
+    pub network: NetworkSettings,
     pub prometheus: PrometheusSettings,
     pub otlp: OtlpSettings,
     pub security: SecuritySettings,
@@ -96,6 +99,22 @@ impl AgentConfig {
                 field: "metadata.providers",
             });
         }
+        if self.network.tc_hooks_enabled && self.network.tc_interfaces.is_empty() {
+            return Err(ConfigError::MissingRequired {
+                field: "network.tc_interfaces",
+            });
+        }
+        if self
+            .network
+            .tc_interfaces
+            .iter()
+            .any(|interface| interface.trim().is_empty())
+        {
+            return Err(ConfigError::InvalidValue {
+                field: "network.tc_interfaces",
+                reason: "interface names must be non-empty",
+            });
+        }
 
         Ok(())
     }
@@ -107,6 +126,7 @@ impl Default for AgentConfig {
             agent: AgentSettings::default(),
             bpf: BpfLoaderConfig::new(default_ebpf_object_path(), default_bpf_pin_path()),
             metadata: MetadataSettings::default(),
+            network: NetworkSettings::default(),
             prometheus: PrometheusSettings::default(),
             otlp: OtlpSettings::default(),
             security: SecuritySettings::default(),
@@ -150,6 +170,12 @@ pub enum MetadataProvider {
     Cri,
     Kubernetes,
     Systemd,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct NetworkSettings {
+    pub tc_hooks_enabled: bool,
+    pub tc_interfaces: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -239,6 +265,7 @@ struct RawConfig {
     agent: RawAgentSettings,
     bpf: RawBpfSettings,
     metadata: RawMetadataSettings,
+    network: RawNetworkSettings,
     prometheus: RawPrometheusSettings,
     otlp: RawOtlpSettings,
     security: RawSecuritySettings,
@@ -284,6 +311,16 @@ impl RawConfig {
                     .metadata
                     .providers
                     .unwrap_or(defaults.metadata.providers),
+            },
+            network: NetworkSettings {
+                tc_hooks_enabled: self
+                    .network
+                    .tc_hooks_enabled
+                    .unwrap_or(defaults.network.tc_hooks_enabled),
+                tc_interfaces: self
+                    .network
+                    .tc_interfaces
+                    .unwrap_or(defaults.network.tc_interfaces),
             },
             prometheus: PrometheusSettings {
                 listen_addr: parse_socket_addr(
@@ -331,6 +368,13 @@ struct RawBpfSettings {
 #[serde(default, deny_unknown_fields)]
 struct RawMetadataSettings {
     providers: Option<Vec<MetadataProvider>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct RawNetworkSettings {
+    tc_hooks_enabled: Option<bool>,
+    tc_interfaces: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -399,6 +443,11 @@ impl EnvOverrides {
             ENV_PROMETHEUS_LISTEN_ADDR,
             &mut config.prometheus.listen_addr,
         )?;
+        self.apply_bool(
+            ENV_NETWORK_TC_HOOKS_ENABLED,
+            &mut config.network.tc_hooks_enabled,
+        )?;
+        self.apply_string_list(ENV_NETWORK_TC_INTERFACES, &mut config.network.tc_interfaces)?;
         self.apply_string(ENV_OTLP_ENDPOINT, &mut config.otlp.endpoint)?;
         self.apply_string(ENV_LOG_LEVEL, &mut config.logging.level)?;
         self.apply_bool(
@@ -445,6 +494,20 @@ impl EnvOverrides {
         if let Some(value) = self.value(name)? {
             target.clear();
             target.push_str(value);
+        }
+
+        Ok(())
+    }
+
+    fn apply_string_list(
+        &self,
+        name: &'static str,
+        target: &mut Vec<String>,
+    ) -> Result<(), ConfigError> {
+        if let Some(value) = self.value(name)? {
+            let values = parse_csv_list(name, value)?;
+            target.clear();
+            target.extend(values);
         }
 
         Ok(())
@@ -506,6 +569,24 @@ fn parse_socket_addr(
     })
 }
 
+fn parse_csv_list(name: &'static str, value: &str) -> Result<Vec<String>, ConfigError> {
+    let values = value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+
+    if values.is_empty() {
+        return Err(ConfigError::InvalidEnv {
+            name,
+            reason: "expected comma-separated non-empty values",
+        });
+    }
+
+    Ok(values)
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -529,6 +610,8 @@ mod tests {
         assert_eq!(config.bpf.pin_path, default_bpf_pin_path());
         assert!(config.bpf.ephemeral);
         assert_eq!(config.metadata.providers, vec![MetadataProvider::Systemd]);
+        assert!(!config.network.tc_hooks_enabled);
+        assert!(config.network.tc_interfaces.is_empty());
         assert_eq!(
             config.prometheus.listen_addr,
             SocketAddr::from(([127, 0, 0, 1], 9090))
@@ -553,6 +636,10 @@ metadata:
   providers:
     - docker
     - systemd
+network:
+  tc_hooks_enabled: true
+  tc_interfaces:
+    - eth0
 prometheus:
   listen_addr: 0.0.0.0:9999
 otlp:
@@ -581,6 +668,8 @@ logging:
             config.metadata.providers,
             vec![MetadataProvider::Docker, MetadataProvider::Systemd]
         );
+        assert!(config.network.tc_hooks_enabled);
+        assert_eq!(config.network.tc_interfaces, vec!["eth0"]);
         assert_eq!(
             config.prometheus.listen_addr,
             "0.0.0.0:9999"
@@ -622,6 +711,8 @@ prometheus:
                 (ENV_BPF_PIN_PATH, "/tmp/prism-pins"),
                 (ENV_BPF_EPHEMERAL, "false"),
                 (ENV_PROMETHEUS_LISTEN_ADDR, "0.0.0.0:9091"),
+                (ENV_NETWORK_TC_HOOKS_ENABLED, "true"),
+                (ENV_NETWORK_TC_INTERFACES, "eth0, lo"),
                 (ENV_OTLP_ENDPOINT, "http://collector:4317"),
                 (ENV_LOG_LEVEL, "trace"),
                 (ENV_CAPTURE_PROCESS_EXEC, "true"),
@@ -641,6 +732,8 @@ prometheus:
                 .parse::<SocketAddr>()
                 .expect("socket addr should parse")
         );
+        assert!(config.network.tc_hooks_enabled);
+        assert_eq!(config.network.tc_interfaces, vec!["eth0", "lo"]);
         assert_eq!(config.otlp.endpoint, "http://collector:4317");
         assert_eq!(config.logging.level, "trace");
         assert!(config.security.capture_process_exec);
@@ -685,6 +778,30 @@ agent:
             ConfigError::InvalidEnv {
                 name: ENV_BPF_EPHEMERAL,
                 reason: "expected boolean"
+            }
+        ));
+    }
+
+    #[test]
+    fn enabled_network_hooks_require_interfaces() {
+        let temp_dir = TempDir::new().expect("tempdir should be created");
+        let path = temp_dir.path().join("config.yaml");
+        fs::write(
+            &path,
+            r"
+network:
+  tc_hooks_enabled: true
+",
+        )
+        .expect("config should be written");
+
+        let error = AgentConfig::load_with_test_env(&path, ConfigPathMode::Required, &[])
+            .expect_err("enabled tc hooks should require interfaces");
+
+        assert!(matches!(
+            error,
+            ConfigError::MissingRequired {
+                field: "network.tc_interfaces"
             }
         ));
     }
