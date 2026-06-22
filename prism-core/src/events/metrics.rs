@@ -61,6 +61,10 @@ impl MetricCounters {
             self.drop_count,
         ]
     }
+
+    pub fn add_cpu_runtime(&mut self, delta_ns: u64) {
+        self.cpu_runtime_ns = self.cpu_runtime_ns.saturating_add(delta_ns);
+    }
 }
 
 #[repr(C)]
@@ -98,5 +102,17 @@ mod tests {
         let counters = MetricCounters::from_raw(raw);
 
         assert_eq!(counters.into_raw(), raw);
+    }
+
+    #[test]
+    fn cpu_runtime_counter_is_monotonic_and_saturating() {
+        let mut counters = MetricCounters {
+            cpu_runtime_ns: u64::MAX - 2,
+            ..MetricCounters::default()
+        };
+
+        counters.add_cpu_runtime(7);
+
+        assert_eq!(counters.cpu_runtime_ns, u64::MAX);
     }
 }
