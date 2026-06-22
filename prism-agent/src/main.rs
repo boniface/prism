@@ -18,7 +18,12 @@ async fn main() -> Result<()> {
         "reconciled stale eBPF pins"
     );
 
-    let loaded_bpf = LoadedBpf::load(&config.bpf).context("failed to load eBPF lifecycle proof")?;
+    let loaded_bpf = if config.network.tc_hooks_enabled {
+        LoadedBpf::load_with_tc_hooks(&config.bpf, &config.network.tc_interfaces)
+            .context("failed to load eBPF programs with TC hooks")?
+    } else {
+        LoadedBpf::load(&config.bpf).context("failed to load eBPF programs")?
+    };
     info!("prism-agent started");
 
     wait_for_shutdown().await;

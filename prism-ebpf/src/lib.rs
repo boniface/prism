@@ -2,10 +2,11 @@
 #![no_main]
 
 use aya_ebpf::{
+    bindings::TC_ACT_OK,
     helpers::{bpf_get_current_cgroup_id, bpf_ktime_get_ns},
-    macros::{map, tracepoint},
+    macros::{classifier, map, tracepoint},
     maps::{Array, HashMap, RingBuf},
-    programs::TracePointContext,
+    programs::{TcContext, TracePointContext},
 };
 use core::ptr::addr_of_mut;
 use prism_core::events::metrics::{MetricCounters, MetricEvent};
@@ -76,6 +77,20 @@ fn try_prism_sched_switch(_ctx: TracePointContext) -> u32 {
     0
 }
 
+#[classifier]
+#[allow(clippy::needless_pass_by_value)]
+pub fn prism_tc_ingress(ctx: TcContext) -> i32 {
+    record_network_rx(&ctx);
+    TC_ACT_OK
+}
+
+#[classifier]
+#[allow(clippy::needless_pass_by_value)]
+pub fn prism_tc_egress(ctx: TcContext) -> i32 {
+    record_network_tx(&ctx);
+    TC_ACT_OK
+}
+
 fn current_cgroup_id() -> u64 {
     // SAFETY: `bpf_get_current_cgroup_id` is a side-effect-free helper
     // available to tracepoint programs and returns zero if no cgroup can be
@@ -134,6 +149,49 @@ fn add_cpu_runtime(cgroup_id: u64, delta_ns: u64) {
 
     let mut counters = MetricCounters::default();
     counters.add_cpu_runtime(delta_ns);
+    // SAFETY: The map pointer is formed without borrowing the mutable static.
+    // Key and value are fixed-size POD ABI types shared with user-space.
+    let _ = unsafe { (*metrics).insert(&cgroup_id, &counters, 0) };
+    emit_metric_event(cgroup_id, counters);
+}
+
+fn record_network_rx(ctx: &TcContext) {
+    let cgroup_id = current_cgroup_id();
+    let bytes = u64::from(ctx.len());
+    update_network_counters(cgroup_id, bytes, true);
+}
+
+fn record_network_tx(ctx: &TcContext) {
+    let cgroup_id = current_cgroup_id();
+    let bytes = u64::from(ctx.len());
+    update_network_counters(cgroup_id, bytes, false);
+}
+
+fn update_network_counters(cgroup_id: u64, bytes: u64, ingress: bool) {
+    let metrics = addr_of_mut!(CGROUP_METRICS);
+    // SAFETY: The map pointer is formed without borrowing the mutable static.
+    // The returned pointer is verifier-checked before mutation below.
+    let counter = unsafe { (*metrics).get_ptr_mut(&cgroup_id) };
+    if let Some(value) = counter {
+        // SAFETY: `value` points to the metric map entry for `cgroup_id`; the
+        // update is a saturating scalar addition on the copied ABI struct.
+        unsafe {
+            if ingress {
+                (*value).add_network_rx(bytes, 1);
+            } else {
+                (*value).add_network_tx(bytes, 1);
+            }
+            emit_metric_event(cgroup_id, *value);
+        }
+        return;
+    }
+
+    let mut counters = MetricCounters::default();
+    if ingress {
+        counters.add_network_rx(bytes, 1);
+    } else {
+        counters.add_network_tx(bytes, 1);
+    }
     // SAFETY: The map pointer is formed without borrowing the mutable static.
     // Key and value are fixed-size POD ABI types shared with user-space.
     let _ = unsafe { (*metrics).insert(&cgroup_id, &counters, 0) };
