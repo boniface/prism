@@ -22,6 +22,9 @@ static mut CGROUP_METRICS: HashMap<u64, MetricCounters> =
     HashMap::with_max_entries(MAX_CGROUP_METRICS, 0);
 
 #[map]
+static mut CPU_LAST_RUN_NS: HashMap<u64, u64> = HashMap::with_max_entries(MAX_CGROUP_METRICS, 0);
+
+#[map]
 static mut METRIC_EVENTS: RingBuf = RingBuf::with_byte_size(METRIC_RING_BYTES, 0);
 
 #[map]
@@ -34,7 +37,7 @@ pub fn prism_lifecycle(ctx: TracePointContext) -> u32 {
 
 fn try_prism_lifecycle(_ctx: TracePointContext) -> u32 {
     let cgroup_id = current_cgroup_id();
-    record_metric_snapshot(cgroup_id, MetricCounters::default());
+    ensure_metric_snapshot(cgroup_id);
 
     let key = 0;
 
@@ -56,6 +59,23 @@ fn try_prism_lifecycle(_ctx: TracePointContext) -> u32 {
     0
 }
 
+#[tracepoint]
+pub fn prism_sched_switch(ctx: TracePointContext) -> u32 {
+    try_prism_sched_switch(ctx)
+}
+
+fn try_prism_sched_switch(_ctx: TracePointContext) -> u32 {
+    let cgroup_id = current_cgroup_id();
+    let now_ns = monotonic_time_ns();
+    let last_ns = update_last_cpu_timestamp(cgroup_id, now_ns);
+
+    if last_ns > 0 && now_ns > last_ns {
+        add_cpu_runtime(cgroup_id, now_ns.saturating_sub(last_ns));
+    }
+
+    0
+}
+
 fn current_cgroup_id() -> u64 {
     // SAFETY: `bpf_get_current_cgroup_id` is a side-effect-free helper
     // available to tracepoint programs and returns zero if no cgroup can be
@@ -70,12 +90,53 @@ fn monotonic_time_ns() -> u64 {
     unsafe { bpf_ktime_get_ns() }
 }
 
-fn record_metric_snapshot(cgroup_id: u64, counters: MetricCounters) {
+fn update_last_cpu_timestamp(cgroup_id: u64, now_ns: u64) -> u64 {
+    let cpu_last_run = addr_of_mut!(CPU_LAST_RUN_NS);
+    // SAFETY: The map pointer is formed without borrowing the mutable static.
+    // Key and value are fixed-size scalar types accepted by the verifier.
+    let last_ns = unsafe { (*cpu_last_run).get(&cgroup_id).copied().unwrap_or(0) };
+    // SAFETY: The map pointer is formed without borrowing the mutable static.
+    // The timestamp value is copied into the hash map for the current cgroup.
+    let _ = unsafe { (*cpu_last_run).insert(&cgroup_id, &now_ns, 0) };
+    last_ns
+}
+
+fn ensure_metric_snapshot(cgroup_id: u64) {
     let metrics = addr_of_mut!(CGROUP_METRICS);
+    // SAFETY: The map pointer is formed without borrowing the mutable static.
+    // The lookup only checks whether the cgroup already has a counter entry.
+    if unsafe { (*metrics).get(&cgroup_id).is_some() } {
+        return;
+    }
+
+    let counters = MetricCounters::default();
     // SAFETY: The map pointer is formed without borrowing the mutable static.
     // Key and value are fixed-size POD ABI types shared with user-space.
     let _ = unsafe { (*metrics).insert(&cgroup_id, &counters, 0) };
 
+    emit_metric_event(cgroup_id, counters);
+}
+
+fn add_cpu_runtime(cgroup_id: u64, delta_ns: u64) {
+    let metrics = addr_of_mut!(CGROUP_METRICS);
+    // SAFETY: The map pointer is formed without borrowing the mutable static.
+    // The returned pointer is verifier-checked before mutation below.
+    let counter = unsafe { (*metrics).get_ptr_mut(&cgroup_id) };
+    if let Some(value) = counter {
+        // SAFETY: `value` points to the metric map entry for `cgroup_id`; the
+        // update is a saturating scalar addition on the copied ABI struct.
+        unsafe {
+            (*value).add_cpu_runtime(delta_ns);
+            emit_metric_event(cgroup_id, *value);
+        }
+        return;
+    }
+
+    let mut counters = MetricCounters::default();
+    counters.add_cpu_runtime(delta_ns);
+    // SAFETY: The map pointer is formed without borrowing the mutable static.
+    // Key and value are fixed-size POD ABI types shared with user-space.
+    let _ = unsafe { (*metrics).insert(&cgroup_id, &counters, 0) };
     emit_metric_event(cgroup_id, counters);
 }
 
