@@ -4,7 +4,9 @@
 use aya_ebpf::helpers::bpf_get_current_pid_tgid;
 use aya_ebpf::{
     bindings::TC_ACT_OK,
-    helpers::{bpf_get_current_cgroup_id, bpf_get_current_comm, bpf_get_current_uid_gid, bpf_ktime_get_ns},
+    helpers::{
+        bpf_get_current_cgroup_id, bpf_get_current_comm, bpf_get_current_uid_gid, bpf_ktime_get_ns,
+    },
     macros::{classifier, map, tracepoint},
     maps::{Array, HashMap, RingBuf},
     programs::{TcContext, TracePointContext},

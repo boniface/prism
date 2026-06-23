@@ -31,8 +31,7 @@ async fn main() -> Result<()> {
         LoadedBpf::load(&config.bpf).context("failed to load eBPF programs")?
     };
 
-    let metrics_source: Arc<dyn MetricSnapshotSource> =
-        Arc::new(BpfMetricSource::new(loaded_bpf));
+    let metrics_source: Arc<dyn MetricSnapshotSource> = Arc::new(BpfMetricSource::new(loaded_bpf));
     let prometheus = PrometheusServer::bind(&config.prometheus, metrics_source)
         .await
         .context("failed to bind prometheus exporter")?;
@@ -45,8 +44,7 @@ async fn main() -> Result<()> {
     #[cfg(target_os = "linux")]
     {
         let ebpf_arc = Arc::new(Mutex::new(
-            LoadedBpf::load(&config.bpf)
-                .context("failed to load eBPF for security processor")?,
+            LoadedBpf::load(&config.bpf).context("failed to load eBPF for security processor")?,
         ));
         let ebpf_for_processor = Arc::clone(&ebpf_arc);
 
