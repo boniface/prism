@@ -6,16 +6,17 @@
 //!     PRISM_EBPF_OBJECT=target/bpfel-unknown-none/release/libprism_ebpf.so \
 //!     cargo +nightly test --test `lifecycle_integration` -- --nocapture
 
-use prism_agent::bpf::{
-    cleanup::reconcile_stale_pins,
-    loader::{BpfLifecycleError, BpfLoaderConfig, LoadedBpf},
-};
+use prism_agent::bpf::cleanup::reconcile_stale_pins;
+#[cfg(target_os = "linux")]
+use prism_agent::bpf::loader::{BpfLifecycleError, BpfLoaderConfig, LoadedBpf};
 use std::path::PathBuf;
 
+#[cfg(target_os = "linux")]
 fn privileged_tests_enabled() -> bool {
     std::env::var("PRISM_PRIVILEGED_TESTS").is_ok()
 }
 
+#[cfg(target_os = "linux")]
 fn ebpf_object_path() -> PathBuf {
     std::env::var("PRISM_EBPF_OBJECT").map_or_else(
         |_| PathBuf::from("target/bpfel-unknown-none/release/libprism_ebpf.so"),
@@ -23,6 +24,7 @@ fn ebpf_object_path() -> PathBuf {
     )
 }
 
+#[cfg(target_os = "linux")]
 fn test_pin_root() -> PathBuf {
     PathBuf::from("/tmp/prism-integration-test-pins")
 }
