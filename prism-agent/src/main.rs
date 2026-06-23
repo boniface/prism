@@ -2,11 +2,13 @@ use anyhow::{Context, Result};
 use prism_agent::{
     bpf::{LoadedBpf, reconcile_stale_pins},
     config::AgentConfig,
+    metrics::{BpfMetricSource, MetricSnapshotSource, PrometheusServer},
     processors::run_security_processor,
     runtime::{ManagedTaskRuntime, TaskRuntimeConfig},
 };
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 #[tokio::main]
@@ -22,15 +24,31 @@ async fn main() -> Result<()> {
         "reconciled stale eBPF pins"
     );
 
-    let loaded_bpf = LoadedBpf::load(&config.bpf).context("failed to load eBPF lifecycle proof")?;
+    let loaded_bpf = if config.network.tc_hooks_enabled {
+        LoadedBpf::load_with_tc_hooks(&config.bpf, &config.network.tc_interfaces)
+            .context("failed to load eBPF programs with TC hooks")?
+    } else {
+        LoadedBpf::load(&config.bpf).context("failed to load eBPF programs")?
+    };
+
+    let metrics_source: Arc<dyn MetricSnapshotSource> =
+        Arc::new(BpfMetricSource::new(loaded_bpf));
+    let prometheus = PrometheusServer::bind(&config.prometheus, metrics_source)
+        .await
+        .context("failed to bind prometheus exporter")?;
+    let shutdown = CancellationToken::new();
+    let prometheus_task = tokio::spawn(prometheus.run(shutdown.clone()));
 
     let mut runtime = ManagedTaskRuntime::new(TaskRuntimeConfig::default());
     let token = runtime.cancellation_token();
 
     #[cfg(target_os = "linux")]
     {
-        let ebpf = Arc::new(Mutex::new(loaded_bpf));
-        let ebpf_for_processor = Arc::clone(&ebpf);
+        let ebpf_arc = Arc::new(Mutex::new(
+            LoadedBpf::load(&config.bpf)
+                .context("failed to load eBPF for security processor")?,
+        ));
+        let ebpf_for_processor = Arc::clone(&ebpf_arc);
 
         runtime
             .spawn("security-processor", move |task_token| async move {
@@ -38,29 +56,21 @@ async fn main() -> Result<()> {
                 run_security_processor(guard.ebpf_mut(), task_token).await
             })
             .await;
-
-        info!("prism-agent started");
-        wait_for_shutdown().await;
-
-        token.cancel();
-        if let Err(e) = runtime.shutdown().await {
-            error!(error = %e, "runtime shutdown error");
-        }
-
-        let bpf = Arc::try_unwrap(ebpf)
-            .map_err(|_| anyhow::anyhow!("eBPF handle still referenced at shutdown"))?
-            .into_inner();
-        bpf.shutdown();
     }
 
-    #[cfg(not(target_os = "linux"))]
-    {
-        info!("prism-agent started");
-        wait_for_shutdown().await;
-        token.cancel();
-        let _ = runtime.shutdown().await;
-        loaded_bpf.shutdown();
+    info!("prism-agent started");
+    wait_for_shutdown().await;
+
+    token.cancel();
+    if let Err(e) = runtime.shutdown().await {
+        error!(error = %e, "runtime shutdown error");
     }
+
+    shutdown.cancel();
+    prometheus_task
+        .await
+        .context("failed to join prometheus exporter task")?
+        .context("prometheus exporter failed")?;
 
     info!("prism-agent stopped cleanly");
     Ok(())

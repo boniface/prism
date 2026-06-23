@@ -10,8 +10,17 @@ metadata:
   providers:
     - systemd
 
+network:
+  tc_hooks_enabled: false
+  tc_interfaces: []
+
 prometheus:
   listen_addr: 127.0.0.1:9090
+  label_allowlist:
+    - cgroup-id
+  max_label_value_len: 128
+  expensive_dimensions_enabled: false
+  series_limit: 10000
 
 otlp:
   endpoint: http://127.0.0.1:4317

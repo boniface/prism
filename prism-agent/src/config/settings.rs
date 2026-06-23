@@ -21,6 +21,13 @@ const ENV_EBPF_OBJECT: &str = "PRISM_EBPF_OBJECT";
 const ENV_BPF_PIN_PATH: &str = "PRISM_BPF_PIN_PATH";
 const ENV_BPF_EPHEMERAL: &str = "PRISM_BPF_EPHEMERAL";
 const ENV_PROMETHEUS_LISTEN_ADDR: &str = "PRISM_PROMETHEUS_LISTEN_ADDR";
+const ENV_PROMETHEUS_LABEL_ALLOWLIST: &str = "PRISM_PROMETHEUS_LABEL_ALLOWLIST";
+const ENV_PROMETHEUS_MAX_LABEL_VALUE_LEN: &str = "PRISM_PROMETHEUS_MAX_LABEL_VALUE_LEN";
+const ENV_PROMETHEUS_EXPENSIVE_DIMENSIONS_ENABLED: &str =
+    "PRISM_PROMETHEUS_EXPENSIVE_DIMENSIONS_ENABLED";
+const ENV_PROMETHEUS_SERIES_LIMIT: &str = "PRISM_PROMETHEUS_SERIES_LIMIT";
+const ENV_NETWORK_TC_HOOKS_ENABLED: &str = "PRISM_NETWORK_TC_HOOKS_ENABLED";
+const ENV_NETWORK_TC_INTERFACES: &str = "PRISM_NETWORK_TC_INTERFACES";
 const ENV_OTLP_ENDPOINT: &str = "PRISM_OTLP_ENDPOINT";
 const ENV_LOG_LEVEL: &str = "PRISM_LOG_LEVEL";
 const ENV_CAPTURE_PROCESS_EXEC: &str = "PRISM_CAPTURE_PROCESS_EXEC";
@@ -31,6 +38,7 @@ pub struct AgentConfig {
     pub agent: AgentSettings,
     pub bpf: BpfLoaderConfig,
     pub metadata: MetadataSettings,
+    pub network: NetworkSettings,
     pub prometheus: PrometheusSettings,
     pub otlp: OtlpSettings,
     pub security: SecuritySettings,
@@ -96,6 +104,46 @@ impl AgentConfig {
                 field: "metadata.providers",
             });
         }
+        if self.network.tc_hooks_enabled && self.network.tc_interfaces.is_empty() {
+            return Err(ConfigError::MissingRequired {
+                field: "network.tc_interfaces",
+            });
+        }
+        if self
+            .network
+            .tc_interfaces
+            .iter()
+            .any(|interface| interface.trim().is_empty())
+        {
+            return Err(ConfigError::InvalidValue {
+                field: "network.tc_interfaces",
+                reason: "interface names must be non-empty",
+            });
+        }
+        if self.prometheus.max_label_value_len == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "prometheus.max_label_value_len",
+                reason: "must be greater than zero",
+            });
+        }
+        if self.prometheus.series_limit == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "prometheus.series_limit",
+                reason: "must be greater than zero",
+            });
+        }
+        if !self.prometheus.expensive_dimensions_enabled
+            && self
+                .prometheus
+                .label_allowlist
+                .iter()
+                .any(|label| label.is_high_cardinality())
+        {
+            return Err(ConfigError::InvalidValue {
+                field: "prometheus.label_allowlist",
+                reason: "high-cardinality labels require expensive_dimensions_enabled",
+            });
+        }
 
         Ok(())
     }
@@ -107,6 +155,7 @@ impl Default for AgentConfig {
             agent: AgentSettings::default(),
             bpf: BpfLoaderConfig::new(default_ebpf_object_path(), default_bpf_pin_path()),
             metadata: MetadataSettings::default(),
+            network: NetworkSettings::default(),
             prometheus: PrometheusSettings::default(),
             otlp: OtlpSettings::default(),
             security: SecuritySettings::default(),
@@ -152,15 +201,60 @@ pub enum MetadataProvider {
     Systemd,
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct NetworkSettings {
+    pub tc_hooks_enabled: bool,
+    pub tc_interfaces: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrometheusSettings {
     pub listen_addr: SocketAddr,
+    pub label_allowlist: Vec<PrometheusLabel>,
+    pub max_label_value_len: usize,
+    pub expensive_dimensions_enabled: bool,
+    pub series_limit: usize,
 }
 
 impl Default for PrometheusSettings {
     fn default() -> Self {
         Self {
             listen_addr: SocketAddr::from(([127, 0, 0, 1], 9090)),
+            label_allowlist: vec![PrometheusLabel::CgroupId],
+            max_label_value_len: 128,
+            expensive_dimensions_enabled: false,
+            series_limit: 10_000,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PrometheusLabel {
+    CgroupId,
+    ContainerId,
+    ContainerName,
+    Namespace,
+    PodName,
+}
+
+impl PrometheusLabel {
+    #[must_use]
+    pub const fn is_high_cardinality(self) -> bool {
+        matches!(
+            self,
+            Self::ContainerId | Self::ContainerName | Self::PodName
+        )
+    }
+
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::CgroupId => "cgroup_id",
+            Self::ContainerId => "container_id",
+            Self::ContainerName => "container_name",
+            Self::Namespace => "namespace",
+            Self::PodName => "pod_name",
         }
     }
 }
@@ -239,6 +333,7 @@ struct RawConfig {
     agent: RawAgentSettings,
     bpf: RawBpfSettings,
     metadata: RawMetadataSettings,
+    network: RawNetworkSettings,
     prometheus: RawPrometheusSettings,
     otlp: RawOtlpSettings,
     security: RawSecuritySettings,
@@ -285,12 +380,38 @@ impl RawConfig {
                     .providers
                     .unwrap_or(defaults.metadata.providers),
             },
+            network: NetworkSettings {
+                tc_hooks_enabled: self
+                    .network
+                    .tc_hooks_enabled
+                    .unwrap_or(defaults.network.tc_hooks_enabled),
+                tc_interfaces: self
+                    .network
+                    .tc_interfaces
+                    .unwrap_or(defaults.network.tc_interfaces),
+            },
             prometheus: PrometheusSettings {
                 listen_addr: parse_socket_addr(
                     "prometheus.listen_addr",
                     self.prometheus.listen_addr.as_deref(),
                     defaults.prometheus.listen_addr,
                 )?,
+                label_allowlist: self
+                    .prometheus
+                    .label_allowlist
+                    .unwrap_or(defaults.prometheus.label_allowlist),
+                max_label_value_len: self
+                    .prometheus
+                    .max_label_value_len
+                    .unwrap_or(defaults.prometheus.max_label_value_len),
+                expensive_dimensions_enabled: self
+                    .prometheus
+                    .expensive_dimensions_enabled
+                    .unwrap_or(defaults.prometheus.expensive_dimensions_enabled),
+                series_limit: self
+                    .prometheus
+                    .series_limit
+                    .unwrap_or(defaults.prometheus.series_limit),
             },
             otlp: OtlpSettings {
                 endpoint: self.otlp.endpoint.unwrap_or(defaults.otlp.endpoint),
@@ -335,8 +456,19 @@ struct RawMetadataSettings {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+struct RawNetworkSettings {
+    tc_hooks_enabled: Option<bool>,
+    tc_interfaces: Option<Vec<String>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 struct RawPrometheusSettings {
     listen_addr: Option<String>,
+    label_allowlist: Option<Vec<PrometheusLabel>>,
+    max_label_value_len: Option<usize>,
+    expensive_dimensions_enabled: Option<bool>,
+    series_limit: Option<usize>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -399,6 +531,27 @@ impl EnvOverrides {
             ENV_PROMETHEUS_LISTEN_ADDR,
             &mut config.prometheus.listen_addr,
         )?;
+        self.apply_prometheus_labels(
+            ENV_PROMETHEUS_LABEL_ALLOWLIST,
+            &mut config.prometheus.label_allowlist,
+        )?;
+        self.apply_usize(
+            ENV_PROMETHEUS_MAX_LABEL_VALUE_LEN,
+            &mut config.prometheus.max_label_value_len,
+        )?;
+        self.apply_bool(
+            ENV_PROMETHEUS_EXPENSIVE_DIMENSIONS_ENABLED,
+            &mut config.prometheus.expensive_dimensions_enabled,
+        )?;
+        self.apply_usize(
+            ENV_PROMETHEUS_SERIES_LIMIT,
+            &mut config.prometheus.series_limit,
+        )?;
+        self.apply_bool(
+            ENV_NETWORK_TC_HOOKS_ENABLED,
+            &mut config.network.tc_hooks_enabled,
+        )?;
+        self.apply_string_list(ENV_NETWORK_TC_INTERFACES, &mut config.network.tc_interfaces)?;
         self.apply_string(ENV_OTLP_ENDPOINT, &mut config.otlp.endpoint)?;
         self.apply_string(ENV_LOG_LEVEL, &mut config.logging.level)?;
         self.apply_bool(
@@ -441,10 +594,52 @@ impl EnvOverrides {
         Ok(())
     }
 
+    fn apply_usize(&self, name: &'static str, target: &mut usize) -> Result<(), ConfigError> {
+        if let Some(value) = self.value(name)? {
+            *target = value.parse().map_err(|_| ConfigError::InvalidEnv {
+                name,
+                reason: "expected unsigned integer",
+            })?;
+        }
+
+        Ok(())
+    }
+
+    fn apply_prometheus_labels(
+        &self,
+        name: &'static str,
+        target: &mut Vec<PrometheusLabel>,
+    ) -> Result<(), ConfigError> {
+        if let Some(value) = self.value(name)? {
+            let labels = parse_csv_list(name, value)?
+                .into_iter()
+                .map(|label| parse_prometheus_label(name, &label))
+                .collect::<Result<Vec<_>, _>>()?;
+            target.clear();
+            target.extend(labels);
+        }
+
+        Ok(())
+    }
+
     fn apply_string(&self, name: &'static str, target: &mut String) -> Result<(), ConfigError> {
         if let Some(value) = self.value(name)? {
             target.clear();
             target.push_str(value);
+        }
+
+        Ok(())
+    }
+
+    fn apply_string_list(
+        &self,
+        name: &'static str,
+        target: &mut Vec<String>,
+    ) -> Result<(), ConfigError> {
+        if let Some(value) = self.value(name)? {
+            let values = parse_csv_list(name, value)?;
+            target.clear();
+            target.extend(values);
         }
 
         Ok(())
@@ -506,6 +701,38 @@ fn parse_socket_addr(
     })
 }
 
+fn parse_csv_list(name: &'static str, value: &str) -> Result<Vec<String>, ConfigError> {
+    let values = value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+
+    if values.is_empty() {
+        return Err(ConfigError::InvalidEnv {
+            name,
+            reason: "expected comma-separated non-empty values",
+        });
+    }
+
+    Ok(values)
+}
+
+fn parse_prometheus_label(name: &'static str, value: &str) -> Result<PrometheusLabel, ConfigError> {
+    match value {
+        "cgroup-id" | "cgroup_id" => Ok(PrometheusLabel::CgroupId),
+        "container-id" | "container_id" => Ok(PrometheusLabel::ContainerId),
+        "container-name" | "container_name" => Ok(PrometheusLabel::ContainerName),
+        "namespace" => Ok(PrometheusLabel::Namespace),
+        "pod-name" | "pod_name" => Ok(PrometheusLabel::PodName),
+        _ => Err(ConfigError::InvalidEnv {
+            name,
+            reason: "unknown prometheus label",
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -529,10 +756,19 @@ mod tests {
         assert_eq!(config.bpf.pin_path, default_bpf_pin_path());
         assert!(config.bpf.ephemeral);
         assert_eq!(config.metadata.providers, vec![MetadataProvider::Systemd]);
+        assert!(!config.network.tc_hooks_enabled);
+        assert!(config.network.tc_interfaces.is_empty());
         assert_eq!(
             config.prometheus.listen_addr,
             SocketAddr::from(([127, 0, 0, 1], 9090))
         );
+        assert_eq!(
+            config.prometheus.label_allowlist,
+            vec![PrometheusLabel::CgroupId]
+        );
+        assert_eq!(config.prometheus.max_label_value_len, 128);
+        assert!(!config.prometheus.expensive_dimensions_enabled);
+        assert_eq!(config.prometheus.series_limit, 10_000);
     }
 
     #[test]
@@ -553,8 +789,18 @@ metadata:
   providers:
     - docker
     - systemd
+network:
+  tc_hooks_enabled: true
+  tc_interfaces:
+    - eth0
 prometheus:
   listen_addr: 0.0.0.0:9999
+  label_allowlist:
+    - cgroup-id
+    - namespace
+  max_label_value_len: 64
+  expensive_dimensions_enabled: false
+  series_limit: 500
 otlp:
   endpoint: http://collector:4317
 security:
@@ -581,12 +827,21 @@ logging:
             config.metadata.providers,
             vec![MetadataProvider::Docker, MetadataProvider::Systemd]
         );
+        assert!(config.network.tc_hooks_enabled);
+        assert_eq!(config.network.tc_interfaces, vec!["eth0"]);
         assert_eq!(
             config.prometheus.listen_addr,
             "0.0.0.0:9999"
                 .parse::<SocketAddr>()
                 .expect("socket addr should parse")
         );
+        assert_eq!(
+            config.prometheus.label_allowlist,
+            vec![PrometheusLabel::CgroupId, PrometheusLabel::Namespace]
+        );
+        assert_eq!(config.prometheus.max_label_value_len, 64);
+        assert!(!config.prometheus.expensive_dimensions_enabled);
+        assert_eq!(config.prometheus.series_limit, 500);
         assert_eq!(config.otlp.endpoint, "http://collector:4317");
         assert!(config.security.capture_process_exec);
         assert!(config.security.capture_command_line);
@@ -622,6 +877,12 @@ prometheus:
                 (ENV_BPF_PIN_PATH, "/tmp/prism-pins"),
                 (ENV_BPF_EPHEMERAL, "false"),
                 (ENV_PROMETHEUS_LISTEN_ADDR, "0.0.0.0:9091"),
+                (ENV_PROMETHEUS_LABEL_ALLOWLIST, "cgroup-id,container-name"),
+                (ENV_PROMETHEUS_MAX_LABEL_VALUE_LEN, "32"),
+                (ENV_PROMETHEUS_EXPENSIVE_DIMENSIONS_ENABLED, "true"),
+                (ENV_PROMETHEUS_SERIES_LIMIT, "250"),
+                (ENV_NETWORK_TC_HOOKS_ENABLED, "true"),
+                (ENV_NETWORK_TC_INTERFACES, "eth0, lo"),
                 (ENV_OTLP_ENDPOINT, "http://collector:4317"),
                 (ENV_LOG_LEVEL, "trace"),
                 (ENV_CAPTURE_PROCESS_EXEC, "true"),
@@ -641,6 +902,15 @@ prometheus:
                 .parse::<SocketAddr>()
                 .expect("socket addr should parse")
         );
+        assert_eq!(
+            config.prometheus.label_allowlist,
+            vec![PrometheusLabel::CgroupId, PrometheusLabel::ContainerName]
+        );
+        assert_eq!(config.prometheus.max_label_value_len, 32);
+        assert!(config.prometheus.expensive_dimensions_enabled);
+        assert_eq!(config.prometheus.series_limit, 250);
+        assert!(config.network.tc_hooks_enabled);
+        assert_eq!(config.network.tc_interfaces, vec!["eth0", "lo"]);
         assert_eq!(config.otlp.endpoint, "http://collector:4317");
         assert_eq!(config.logging.level, "trace");
         assert!(config.security.capture_process_exec);
@@ -685,6 +955,56 @@ agent:
             ConfigError::InvalidEnv {
                 name: ENV_BPF_EPHEMERAL,
                 reason: "expected boolean"
+            }
+        ));
+    }
+
+    #[test]
+    fn enabled_network_hooks_require_interfaces() {
+        let temp_dir = TempDir::new().expect("tempdir should be created");
+        let path = temp_dir.path().join("config.yaml");
+        fs::write(
+            &path,
+            r"
+network:
+  tc_hooks_enabled: true
+",
+        )
+        .expect("config should be written");
+
+        let error = AgentConfig::load_with_test_env(&path, ConfigPathMode::Required, &[])
+            .expect_err("enabled tc hooks should require interfaces");
+
+        assert!(matches!(
+            error,
+            ConfigError::MissingRequired {
+                field: "network.tc_interfaces"
+            }
+        ));
+    }
+
+    #[test]
+    fn high_cardinality_labels_require_explicit_opt_in() {
+        let temp_dir = TempDir::new().expect("tempdir should be created");
+        let path = temp_dir.path().join("config.yaml");
+        fs::write(
+            &path,
+            r"
+prometheus:
+  label_allowlist:
+    - container-name
+",
+        )
+        .expect("config should be written");
+
+        let error = AgentConfig::load_with_test_env(&path, ConfigPathMode::Required, &[])
+            .expect_err("high-cardinality labels should require opt-in");
+
+        assert!(matches!(
+            error,
+            ConfigError::InvalidValue {
+                field: "prometheus.label_allowlist",
+                reason: "high-cardinality labels require expensive_dimensions_enabled"
             }
         ));
     }
