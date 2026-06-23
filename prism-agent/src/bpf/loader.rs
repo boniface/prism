@@ -8,10 +8,11 @@ pub const CGROUP_METRICS_MAP_NAME: &str = "CGROUP_METRICS";
 pub const CPU_SCHED_PROGRAM_NAME: &str = "prism_sched_switch";
 pub const CPU_SCHED_TRACEPOINT_CATEGORY: &str = "sched";
 pub const CPU_SCHED_TRACEPOINT_NAME: &str = "sched_switch";
+pub const EGRESS_TC_PROGRAM_NAME: &str = "prism_tc_egress";
+pub const EXECVE_PROGRAM_NAME: &str = "prism_execve";
 pub const INGRESS_TC_PROGRAM_NAME: &str = "prism_tc_ingress";
 pub const LIFECYCLE_MAP_NAME: &str = "LIFECYCLE_COUNTER";
 pub const LIFECYCLE_PROGRAM_NAME: &str = "prism_lifecycle";
-pub const EGRESS_TC_PROGRAM_NAME: &str = "prism_tc_egress";
 pub const METRIC_RING_DROPS_MAP_NAME: &str = "METRIC_RING_DROPS";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,7 +77,7 @@ mod linux {
     use super::{
         BpfLifecycleError, BpfLoaderConfig, CGROUP_METRICS_MAP_NAME, CPU_SCHED_PROGRAM_NAME,
         CPU_SCHED_TRACEPOINT_CATEGORY, CPU_SCHED_TRACEPOINT_NAME, EGRESS_TC_PROGRAM_NAME,
-        INGRESS_TC_PROGRAM_NAME, LIFECYCLE_MAP_NAME, LIFECYCLE_PROGRAM_NAME,
+        EXECVE_PROGRAM_NAME, INGRESS_TC_PROGRAM_NAME, LIFECYCLE_MAP_NAME, LIFECYCLE_PROGRAM_NAME,
         METRIC_RING_DROPS_MAP_NAME,
     };
     use crate::metrics::MetricSnapshot;
@@ -86,8 +87,7 @@ mod linux {
     }
 
     impl LoadedBpf {
-        /// Loads the eBPF lifecycle proof program and attaches it to the
-        /// configured tracepoint.
+        /// Loads the eBPF programs and attaches them to their tracepoints.
         ///
         /// # Errors
         ///
@@ -97,8 +97,7 @@ mod linux {
             Self::load_inner(config, &[])
         }
 
-        /// Loads the eBPF programs and attaches optional TC network hooks to
-        /// the provided interfaces.
+        /// Loads the eBPF programs and attaches optional TC network hooks.
         ///
         /// # Errors
         ///
@@ -128,6 +127,7 @@ mod linux {
                 CPU_SCHED_TRACEPOINT_CATEGORY,
                 CPU_SCHED_TRACEPOINT_NAME,
             )?;
+            attach_execve_program(&mut ebpf)?;
             attach_tc_program(
                 &mut ebpf,
                 INGRESS_TC_PROGRAM_NAME,
@@ -147,6 +147,10 @@ mod linux {
 
         pub fn shutdown(self) {
             drop(self.ebpf);
+        }
+
+        pub fn ebpf_mut(&mut self) -> &mut Ebpf {
+            &mut self.ebpf
         }
 
         /// Reads a point-in-time copy of the kernel per-cgroup metric map.
@@ -209,6 +213,16 @@ mod linux {
         Ok(())
     }
 
+    fn attach_execve_program(ebpf: &mut Ebpf) -> Result<(), BpfLifecycleError> {
+        let program = ebpf
+            .program_mut(EXECVE_PROGRAM_NAME)
+            .ok_or(BpfLifecycleError::MissingProgram(EXECVE_PROGRAM_NAME))?;
+        let tracepoint: &mut TracePoint = program.try_into()?;
+        tracepoint.load()?;
+        tracepoint.attach("syscalls", "sys_enter_execve")?;
+        Ok(())
+    }
+
     fn initialize_lifecycle_map(ebpf: &mut Ebpf) -> Result<(), BpfLifecycleError> {
         let map = ebpf
             .map_mut(LIFECYCLE_MAP_NAME)
@@ -258,8 +272,7 @@ mod non_linux {
         ///
         /// # Errors
         ///
-        /// Always returns [`BpfLifecycleError::UnsupportedPlatform`] outside
-        /// Linux.
+        /// Always returns [`BpfLifecycleError::UnsupportedPlatform`] outside Linux.
         pub fn load(_config: &BpfLoaderConfig) -> Result<Self, BpfLifecycleError> {
             Err(BpfLifecycleError::UnsupportedPlatform)
         }
@@ -268,8 +281,7 @@ mod non_linux {
         ///
         /// # Errors
         ///
-        /// Always returns [`BpfLifecycleError::UnsupportedPlatform`] outside
-        /// Linux.
+        /// Always returns [`BpfLifecycleError::UnsupportedPlatform`] outside Linux.
         pub fn load_with_tc_hooks(
             _config: &BpfLoaderConfig,
             _interfaces: &[String],
@@ -283,8 +295,7 @@ mod non_linux {
         ///
         /// # Errors
         ///
-        /// Always returns [`BpfLifecycleError::UnsupportedPlatform`] outside
-        /// Linux.
+        /// Always returns [`BpfLifecycleError::UnsupportedPlatform`] outside Linux.
         pub fn metric_snapshots(
             &self,
         ) -> Result<Vec<crate::metrics::MetricSnapshot>, BpfLifecycleError> {

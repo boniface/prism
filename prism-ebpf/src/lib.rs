@@ -1,23 +1,29 @@
 #![no_std]
 #![no_main]
 
+use aya_ebpf::helpers::bpf_get_current_pid_tgid;
 use aya_ebpf::{
     bindings::TC_ACT_OK,
-    helpers::{bpf_get_current_cgroup_id, bpf_ktime_get_ns},
+    helpers::{
+        bpf_get_current_cgroup_id, bpf_get_current_comm, bpf_get_current_uid_gid, bpf_ktime_get_ns,
+    },
     macros::{classifier, map, tracepoint},
     maps::{Array, HashMap, RingBuf},
     programs::{TcContext, TracePointContext},
 };
 use core::ptr::addr_of_mut;
 use prism_core::events::metrics::{MetricCounters, MetricEvent};
+use prism_core::events::security::{ProcessExecEvent, COMM_LEN};
 
 const MAX_CGROUP_METRICS: u32 = 4_096;
 const METRIC_RING_BYTES: u32 = 256 * 1_024;
 const DROP_COUNTER_KEY: u32 = 0;
 
+// Lifecycle proof map.
 #[map]
 static mut LIFECYCLE_COUNTER: Array<u64> = Array::with_max_entries(1, 0);
 
+// Metrics maps.
 #[map]
 static mut CGROUP_METRICS: HashMap<u64, MetricCounters> =
     HashMap::with_max_entries(MAX_CGROUP_METRICS, 0);
@@ -31,6 +37,14 @@ static mut METRIC_EVENTS: RingBuf = RingBuf::with_byte_size(METRIC_RING_BYTES, 0
 #[map]
 static mut METRIC_RING_DROPS: Array<u64> = Array::with_max_entries(1, 0);
 
+// Security audit ring buffer — 256 KiB.
+#[map]
+static mut SECURITY_EVENTS: RingBuf = RingBuf::with_byte_size(262_144, 0);
+
+// ---------------------------------------------------------------------------
+// Lifecycle proof
+// ---------------------------------------------------------------------------
+
 #[tracepoint]
 pub fn prism_lifecycle(ctx: TracePointContext) -> u32 {
     try_prism_lifecycle(ctx)
@@ -41,13 +55,11 @@ fn try_prism_lifecycle(_ctx: TracePointContext) -> u32 {
     ensure_metric_snapshot(cgroup_id);
 
     let key = 0;
-
     let map = addr_of_mut!(LIFECYCLE_COUNTER);
-
     // SAFETY: The map pointer is created without taking a reference to the
-    // mutable static. The map is defined with one u64 slot, the key is constant
-    // zero, and the eBPF verifier checks the returned pointer before it is
-    // dereferenced.
+    // mutable static. The map is defined with one u64 slot, the key is
+    // constant zero, and the eBPF verifier checks the returned pointer before
+    // it is dereferenced.
     let counter = unsafe { (*map).get_ptr_mut(key) };
     if let Some(value) = counter {
         // SAFETY: `value` is a verifier-checked pointer returned from the map
@@ -56,9 +68,70 @@ fn try_prism_lifecycle(_ctx: TracePointContext) -> u32 {
             *value = monotonic_time_ns();
         }
     }
-
     0
 }
+
+// ---------------------------------------------------------------------------
+// execve audit
+// ---------------------------------------------------------------------------
+
+#[tracepoint(name = "prism_execve", category = "syscalls")]
+pub fn prism_execve(ctx: TracePointContext) -> u32 {
+    try_prism_execve(ctx)
+}
+
+fn try_prism_execve(_ctx: TracePointContext) -> u32 {
+    let ring = addr_of_mut!(SECURITY_EVENTS);
+
+    // SAFETY: The ring buffer pointer is created from the mutable static
+    // without taking a reference. The eBPF verifier validates all map
+    // accesses before the program runs.
+    let Some(mut entry) = (unsafe { (*ring).reserve::<ProcessExecEvent>(0) }) else {
+        return 1;
+    };
+
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let uid_gid = bpf_get_current_uid_gid();
+
+    let pid = (pid_tgid & 0xffff_ffff) as u32;
+    let parent_pid = ((pid_tgid >> 32) & 0xffff_ffff) as u32;
+    let uid = (uid_gid & 0xffff_ffff) as u32;
+    let gid = ((uid_gid >> 32) & 0xffff_ffff) as u32;
+
+    let mut comm = [0u8; COMM_LEN];
+    let comm_len = match bpf_get_current_comm() {
+        Ok(c) => {
+            comm = c;
+            u16::try_from(comm.iter().position(|&b| b == 0).unwrap_or(COMM_LEN)).unwrap_or(0)
+        }
+        Err(_) => 0u16,
+    };
+
+    // SAFETY: `entry` is a reserved ring buffer slot. Writing through the
+    // pointer is safe because the verifier ensures the slot is valid and
+    // sized for `ProcessExecEvent`.
+    unsafe {
+        let event = entry.as_mut_ptr();
+        (*event).timestamp_ns = bpf_ktime_get_ns();
+        (*event).cgroup_id = current_cgroup_id();
+        (*event).pid = pid;
+        (*event).ppid = parent_pid;
+        (*event).uid = uid;
+        (*event).gid = gid;
+        (*event).comm_len = comm_len;
+        (*event).exe_path_len = 0;
+        (*event).reserved = [0u8; 4];
+        (*event).comm = comm;
+        (*event).exe_path = [0u8; 128];
+    }
+
+    entry.submit(0);
+    0
+}
+
+// ---------------------------------------------------------------------------
+// CPU scheduling
+// ---------------------------------------------------------------------------
 
 #[tracepoint]
 pub fn prism_sched_switch(ctx: TracePointContext) -> u32 {
@@ -77,6 +150,10 @@ fn try_prism_sched_switch(_ctx: TracePointContext) -> u32 {
     0
 }
 
+// ---------------------------------------------------------------------------
+// TC hooks
+// ---------------------------------------------------------------------------
+
 #[classifier]
 #[allow(clippy::needless_pass_by_value)]
 pub fn prism_tc_ingress(ctx: TcContext) -> i32 {
@@ -90,6 +167,10 @@ pub fn prism_tc_egress(ctx: TcContext) -> i32 {
     record_network_tx(&ctx);
     TC_ACT_OK
 }
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 fn current_cgroup_id() -> u64 {
     // SAFETY: `bpf_get_current_cgroup_id` is a side-effect-free helper
@@ -108,10 +189,7 @@ fn monotonic_time_ns() -> u64 {
 fn update_last_cpu_timestamp(cgroup_id: u64, now_ns: u64) -> u64 {
     let cpu_last_run = addr_of_mut!(CPU_LAST_RUN_NS);
     // SAFETY: The map pointer is formed without borrowing the mutable static.
-    // Key and value are fixed-size scalar types accepted by the verifier.
     let last_ns = unsafe { (*cpu_last_run).get(&cgroup_id).copied().unwrap_or(0) };
-    // SAFETY: The map pointer is formed without borrowing the mutable static.
-    // The timestamp value is copied into the hash map for the current cgroup.
     let _ = unsafe { (*cpu_last_run).insert(&cgroup_id, &now_ns, 0) };
     last_ns
 }
@@ -119,38 +197,27 @@ fn update_last_cpu_timestamp(cgroup_id: u64, now_ns: u64) -> u64 {
 fn ensure_metric_snapshot(cgroup_id: u64) {
     let metrics = addr_of_mut!(CGROUP_METRICS);
     // SAFETY: The map pointer is formed without borrowing the mutable static.
-    // The lookup only checks whether the cgroup already has a counter entry.
     if unsafe { (*metrics).get(&cgroup_id).is_some() } {
         return;
     }
-
     let counters = MetricCounters::default();
-    // SAFETY: The map pointer is formed without borrowing the mutable static.
-    // Key and value are fixed-size POD ABI types shared with user-space.
     let _ = unsafe { (*metrics).insert(&cgroup_id, &counters, 0) };
-
     emit_metric_event(cgroup_id, counters);
 }
 
 fn add_cpu_runtime(cgroup_id: u64, delta_ns: u64) {
     let metrics = addr_of_mut!(CGROUP_METRICS);
     // SAFETY: The map pointer is formed without borrowing the mutable static.
-    // The returned pointer is verifier-checked before mutation below.
     let counter = unsafe { (*metrics).get_ptr_mut(&cgroup_id) };
     if let Some(value) = counter {
-        // SAFETY: `value` points to the metric map entry for `cgroup_id`; the
-        // update is a saturating scalar addition on the copied ABI struct.
         unsafe {
             (*value).add_cpu_runtime(delta_ns);
             emit_metric_event(cgroup_id, *value);
         }
         return;
     }
-
     let mut counters = MetricCounters::default();
     counters.add_cpu_runtime(delta_ns);
-    // SAFETY: The map pointer is formed without borrowing the mutable static.
-    // Key and value are fixed-size POD ABI types shared with user-space.
     let _ = unsafe { (*metrics).insert(&cgroup_id, &counters, 0) };
     emit_metric_event(cgroup_id, counters);
 }
@@ -170,11 +237,8 @@ fn record_network_tx(ctx: &TcContext) {
 fn update_network_counters(cgroup_id: u64, bytes: u64, ingress: bool) {
     let metrics = addr_of_mut!(CGROUP_METRICS);
     // SAFETY: The map pointer is formed without borrowing the mutable static.
-    // The returned pointer is verifier-checked before mutation below.
     let counter = unsafe { (*metrics).get_ptr_mut(&cgroup_id) };
     if let Some(value) = counter {
-        // SAFETY: `value` points to the metric map entry for `cgroup_id`; the
-        // update is a saturating scalar addition on the copied ABI struct.
         unsafe {
             if ingress {
                 (*value).add_network_rx(bytes, 1);
@@ -185,15 +249,12 @@ fn update_network_counters(cgroup_id: u64, bytes: u64, ingress: bool) {
         }
         return;
     }
-
     let mut counters = MetricCounters::default();
     if ingress {
         counters.add_network_rx(bytes, 1);
     } else {
         counters.add_network_tx(bytes, 1);
     }
-    // SAFETY: The map pointer is formed without borrowing the mutable static.
-    // Key and value are fixed-size POD ABI types shared with user-space.
     let _ = unsafe { (*metrics).insert(&cgroup_id, &counters, 0) };
     emit_metric_event(cgroup_id, counters);
 }
@@ -205,9 +266,7 @@ fn emit_metric_event(cgroup_id: u64, counters: MetricCounters) {
         counters,
     };
     let events = addr_of_mut!(METRIC_EVENTS);
-    // SAFETY: The map pointer is formed without borrowing the mutable static,
-    // and `MetricEvent` is a fixed-layout POD type with alignment accepted by
-    // the ring buffer helper.
+    // SAFETY: The map pointer is formed without borrowing the mutable static.
     if unsafe { (*events).output(&event, 0) }.is_err() {
         increment_drop_counter();
     }
@@ -216,11 +275,8 @@ fn emit_metric_event(cgroup_id: u64, counters: MetricCounters) {
 fn increment_drop_counter() {
     let drops = addr_of_mut!(METRIC_RING_DROPS);
     // SAFETY: The map pointer is formed without borrowing the mutable static.
-    // The array contains exactly one u64 entry at `DROP_COUNTER_KEY`.
     let counter = unsafe { (*drops).get_ptr_mut(DROP_COUNTER_KEY) };
     if let Some(value) = counter {
-        // SAFETY: `value` is a verifier-checked pointer returned from the map
-        // lookup above and points to the only drop counter slot.
         unsafe {
             *value = (*value).saturating_add(1);
         }
