@@ -2,6 +2,8 @@ use std::{path::PathBuf, str::FromStr};
 
 use thiserror::Error;
 
+pub const FILE_OPEN_PROGRAM_NAME: &str = "prism_file_open";
+pub const FILE_ACCESS_RING_BUF_NAME: &str = "FILE_ACCESS_EVENTS";
 pub const DEFAULT_TRACEPOINT_CATEGORY: &str = "syscalls";
 pub const DEFAULT_TRACEPOINT_NAME: &str = "sys_enter_nanosleep";
 pub const CGROUP_METRICS_MAP_NAME: &str = "CGROUP_METRICS";
@@ -77,8 +79,8 @@ mod linux {
     use super::{
         BpfLifecycleError, BpfLoaderConfig, CGROUP_METRICS_MAP_NAME, CPU_SCHED_PROGRAM_NAME,
         CPU_SCHED_TRACEPOINT_CATEGORY, CPU_SCHED_TRACEPOINT_NAME, EGRESS_TC_PROGRAM_NAME,
-        EXECVE_PROGRAM_NAME, INGRESS_TC_PROGRAM_NAME, LIFECYCLE_MAP_NAME, LIFECYCLE_PROGRAM_NAME,
-        METRIC_RING_DROPS_MAP_NAME,
+        EXECVE_PROGRAM_NAME, FILE_OPEN_PROGRAM_NAME, INGRESS_TC_PROGRAM_NAME, LIFECYCLE_MAP_NAME,
+        LIFECYCLE_PROGRAM_NAME, METRIC_RING_DROPS_MAP_NAME,
     };
     use crate::metrics::MetricSnapshot;
 
@@ -128,6 +130,7 @@ mod linux {
                 CPU_SCHED_TRACEPOINT_NAME,
             )?;
             attach_execve_program(&mut ebpf)?;
+            attach_file_open_program(&mut ebpf)?;
             attach_tc_program(
                 &mut ebpf,
                 INGRESS_TC_PROGRAM_NAME,
@@ -220,6 +223,16 @@ mod linux {
         let tracepoint: &mut TracePoint = program.try_into()?;
         tracepoint.load()?;
         tracepoint.attach("syscalls", "sys_enter_execve")?;
+        Ok(())
+    }
+
+    fn attach_file_open_program(ebpf: &mut Ebpf) -> Result<(), BpfLifecycleError> {
+        let program = ebpf
+            .program_mut(FILE_OPEN_PROGRAM_NAME)
+            .ok_or(BpfLifecycleError::MissingProgram(FILE_OPEN_PROGRAM_NAME))?;
+        let tracepoint: &mut TracePoint = program.try_into()?;
+        tracepoint.load()?;
+        tracepoint.attach("syscalls", "sys_enter_openat")?;
         Ok(())
     }
 
