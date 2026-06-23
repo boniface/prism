@@ -13,7 +13,7 @@ use aya_ebpf::{
 };
 use core::ptr::addr_of_mut;
 use prism_core::events::metrics::{MetricCounters, MetricEvent};
-use prism_core::events::security::{ProcessExecEvent, COMM_LEN};
+use prism_core::events::security::{FileAccessEvent, ProcessExecEvent, COMM_LEN, FILE_PATH_LEN};
 
 const MAX_CGROUP_METRICS: u32 = 4_096;
 const METRIC_RING_BYTES: u32 = 256 * 1_024;
@@ -40,6 +40,10 @@ static mut METRIC_RING_DROPS: Array<u64> = Array::with_max_entries(1, 0);
 // Security audit ring buffer — 256 KiB.
 #[map]
 static mut SECURITY_EVENTS: RingBuf = RingBuf::with_byte_size(262_144, 0);
+
+// File access audit ring buffer — 256 KiB.
+#[map]
+static mut FILE_ACCESS_EVENTS: RingBuf = RingBuf::with_byte_size(262_144, 0);
 
 // ---------------------------------------------------------------------------
 // Lifecycle proof
@@ -123,6 +127,46 @@ fn try_prism_execve(_ctx: TracePointContext) -> u32 {
         (*event).reserved = [0u8; 4];
         (*event).comm = comm;
         (*event).exe_path = [0u8; 128];
+    }
+
+    entry.submit(0);
+    0
+}
+
+// ---------------------------------------------------------------------------
+// File open audit
+// ---------------------------------------------------------------------------
+
+#[tracepoint(name = "prism_file_open", category = "syscalls")]
+pub fn prism_file_open(ctx: TracePointContext) -> u32 {
+    try_prism_file_open(ctx)
+}
+
+fn try_prism_file_open(_ctx: TracePointContext) -> u32 {
+    let ring = addr_of_mut!(FILE_ACCESS_EVENTS);
+
+    // SAFETY: The ring buffer pointer is created from the mutable static
+    // without taking a reference. The eBPF verifier validates all map
+    // accesses before the program runs.
+    let Some(mut entry) = (unsafe { (*ring).reserve::<FileAccessEvent>(0) }) else {
+        return 1;
+    };
+
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let uid_gid = bpf_get_current_uid_gid();
+    let pid = (pid_tgid & 0xffff_ffff) as u32;
+    let uid = (uid_gid & 0xffff_ffff) as u32;
+
+    // SAFETY: `entry` is a reserved ring buffer slot sized for FileAccessEvent.
+    unsafe {
+        let event = entry.as_mut_ptr();
+        (*event).timestamp_ns = bpf_ktime_get_ns();
+        (*event).cgroup_id = current_cgroup_id();
+        (*event).pid = pid;
+        (*event).uid = uid;
+        (*event).path_len = 0;
+        (*event).reserved = [0u8; 6];
+        (*event).path = [0u8; FILE_PATH_LEN];
     }
 
     entry.submit(0);
