@@ -48,10 +48,11 @@ async fn main() -> Result<()> {
         ));
         let ebpf_for_processor = Arc::clone(&ebpf_arc);
 
+        let security_settings = config.security;
         runtime
             .spawn("security-processor", move |task_token| async move {
                 let mut guard = ebpf_for_processor.lock().await;
-                run_security_processor(guard.ebpf_mut(), task_token).await
+                run_security_processor(guard.ebpf_mut(), task_token, security_settings).await
             })
             .await;
     }
