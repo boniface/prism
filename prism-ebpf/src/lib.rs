@@ -13,7 +13,9 @@ use aya_ebpf::{
 };
 use core::ptr::addr_of_mut;
 use prism_core::events::metrics::{MetricCounters, MetricEvent};
-use prism_core::events::security::{FileAccessEvent, ProcessExecEvent, COMM_LEN, FILE_PATH_LEN};
+use prism_core::events::security::{
+    FileAccessEvent, NetworkConnectionEvent, ProcessExecEvent, COMM_LEN, FILE_PATH_LEN,
+};
 
 const MAX_CGROUP_METRICS: u32 = 4_096;
 const METRIC_RING_BYTES: u32 = 256 * 1_024;
@@ -44,6 +46,10 @@ static mut SECURITY_EVENTS: RingBuf = RingBuf::with_byte_size(262_144, 0);
 // File access audit ring buffer — 256 KiB.
 #[map]
 static mut FILE_ACCESS_EVENTS: RingBuf = RingBuf::with_byte_size(262_144, 0);
+
+// Network security audit ring buffer — 256 KiB.
+#[map]
+static mut NETWORK_SECURITY_EVENTS: RingBuf = RingBuf::with_byte_size(262_144, 0);
 
 // ---------------------------------------------------------------------------
 // Lifecycle proof
@@ -167,6 +173,58 @@ fn try_prism_file_open(_ctx: TracePointContext) -> u32 {
         (*event).path_len = 0;
         (*event).reserved = [0u8; 6];
         (*event).path = [0u8; FILE_PATH_LEN];
+    }
+
+    entry.submit(0);
+    0
+}
+
+// ---------------------------------------------------------------------------
+// TCP connect audit
+// ---------------------------------------------------------------------------
+
+#[tracepoint(name = "prism_tcp_connect", category = "syscalls")]
+pub fn prism_tcp_connect(ctx: TracePointContext) -> u32 {
+    try_prism_tcp_connect(ctx)
+}
+
+fn try_prism_tcp_connect(_ctx: TracePointContext) -> u32 {
+    let ring = addr_of_mut!(NETWORK_SECURITY_EVENTS);
+
+    // SAFETY: The ring buffer pointer is created from the mutable static
+    // without taking a reference. The eBPF verifier validates all map
+    // accesses before the program runs.
+    let Some(mut entry) = (unsafe { (*ring).reserve::<NetworkConnectionEvent>(0) }) else {
+        return 1;
+    };
+
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let uid_gid = bpf_get_current_uid_gid();
+    let pid = (pid_tgid & 0xffff_ffff) as u32;
+    let uid = (uid_gid & 0xffff_ffff) as u32;
+
+    let mut comm = [0u8; COMM_LEN];
+    let comm_len = match bpf_get_current_comm() {
+        Ok(c) => {
+            comm = c;
+            u16::try_from(comm.iter().position(|&b| b == 0).unwrap_or(COMM_LEN)).unwrap_or(0)
+        }
+        Err(_) => 0u16,
+    };
+
+    // SAFETY: `entry` is a reserved ring buffer slot sized for
+    // `NetworkConnectionEvent`. The verifier checks the slot before use.
+    unsafe {
+        let event = entry.as_mut_ptr();
+        (*event).timestamp_ns = bpf_ktime_get_ns();
+        (*event).cgroup_id = current_cgroup_id();
+        (*event).pid = pid;
+        (*event).uid = uid;
+        (*event).dst_addr = [0u8; 4];
+        (*event).dst_port = 0;
+        (*event).comm_len = comm_len;
+        (*event).comm = comm;
+        (*event).reserved = [0u8; 8];
     }
 
     entry.submit(0);
