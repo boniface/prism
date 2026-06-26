@@ -16,6 +16,8 @@ pub const INGRESS_TC_PROGRAM_NAME: &str = "prism_tc_ingress";
 pub const LIFECYCLE_MAP_NAME: &str = "LIFECYCLE_COUNTER";
 pub const LIFECYCLE_PROGRAM_NAME: &str = "prism_lifecycle";
 pub const METRIC_RING_DROPS_MAP_NAME: &str = "METRIC_RING_DROPS";
+pub const TCP_CONNECT_PROGRAM_NAME: &str = "prism_tcp_connect";
+pub const NETWORK_SECURITY_RING_BUF_NAME: &str = "NETWORK_SECURITY_EVENTS";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BpfLoaderConfig {
@@ -80,7 +82,7 @@ mod linux {
         BpfLifecycleError, BpfLoaderConfig, CGROUP_METRICS_MAP_NAME, CPU_SCHED_PROGRAM_NAME,
         CPU_SCHED_TRACEPOINT_CATEGORY, CPU_SCHED_TRACEPOINT_NAME, EGRESS_TC_PROGRAM_NAME,
         EXECVE_PROGRAM_NAME, FILE_OPEN_PROGRAM_NAME, INGRESS_TC_PROGRAM_NAME, LIFECYCLE_MAP_NAME,
-        LIFECYCLE_PROGRAM_NAME, METRIC_RING_DROPS_MAP_NAME,
+        LIFECYCLE_PROGRAM_NAME, METRIC_RING_DROPS_MAP_NAME, TCP_CONNECT_PROGRAM_NAME,
     };
     use crate::metrics::MetricSnapshot;
 
@@ -131,6 +133,7 @@ mod linux {
             )?;
             attach_execve_program(&mut ebpf)?;
             attach_file_open_program(&mut ebpf)?;
+            attach_tcp_connect_program(&mut ebpf)?;
             attach_tc_program(
                 &mut ebpf,
                 INGRESS_TC_PROGRAM_NAME,
@@ -233,6 +236,16 @@ mod linux {
         let tracepoint: &mut TracePoint = program.try_into()?;
         tracepoint.load()?;
         tracepoint.attach("syscalls", "sys_enter_openat")?;
+        Ok(())
+    }
+
+    fn attach_tcp_connect_program(ebpf: &mut Ebpf) -> Result<(), BpfLifecycleError> {
+        let program = ebpf
+            .program_mut(TCP_CONNECT_PROGRAM_NAME)
+            .ok_or(BpfLifecycleError::MissingProgram(TCP_CONNECT_PROGRAM_NAME))?;
+        let tracepoint: &mut TracePoint = program.try_into()?;
+        tracepoint.load()?;
+        tracepoint.attach("syscalls", "sys_enter_connect")?;
         Ok(())
     }
 

@@ -32,6 +32,26 @@ pub struct FileAccessEvent {
     pub path: [u8; FILE_PATH_LEN],
 }
 
+/// Network connection open event captured from the kernel.
+///
+/// `dst_addr` holds an IPv4 address in network byte order stored in the
+/// first four bytes. IPv6 support is deferred to a future phase.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Zeroable, Pod)]
+pub struct NetworkConnectionEvent {
+    pub timestamp_ns: u64,
+    pub cgroup_id: u64,
+    pub pid: u32,
+    pub uid: u32,
+    /// Destination IPv4 address in network byte order.
+    pub dst_addr: [u8; 4],
+    /// Destination port in host byte order.
+    pub dst_port: u16,
+    pub comm_len: u16,
+    pub comm: [u8; COMM_LEN],
+    pub reserved: [u8; 8],
+}
+
 #[cfg(test)]
 mod tests {
     use core::mem::{align_of, size_of};
@@ -48,5 +68,11 @@ mod tests {
     fn file_access_event_has_stable_layout() {
         assert_eq!(size_of::<FileAccessEvent>(), 160);
         assert_eq!(align_of::<FileAccessEvent>(), 8);
+    }
+
+    #[test]
+    fn network_connection_event_has_stable_layout() {
+        assert_eq!(size_of::<NetworkConnectionEvent>(), 56);
+        assert_eq!(align_of::<NetworkConnectionEvent>(), 8);
     }
 }
