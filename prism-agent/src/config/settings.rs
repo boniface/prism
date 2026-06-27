@@ -272,10 +272,87 @@ impl Default for OtlpSettings {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+/// Action to take when a security policy rule matches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PolicyAction {
+    /// Emit the event with no additional annotation.
+    #[default]
+    Allow,
+    /// Emit the event and label it as a policy violation.
+    Alert,
+    /// Drop the event silently.
+    Deny,
+}
+
+/// A rule that matches a file path prefix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilePathRule {
+    /// Path prefix to match (e.g. `/etc/`).
+    pub prefix: String,
+    /// Action when this rule matches.
+    pub action: PolicyAction,
+}
+
+/// A rule that matches a process executable name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessRule {
+    /// Executable comm name to match (e.g. `bash`).
+    pub comm: String,
+    /// Action when this rule matches.
+    pub action: PolicyAction,
+}
+
+/// A rule that matches a network destination.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetworkRule {
+    /// Destination CIDR or IP prefix to match (e.g. `10.0.0.`).
+    pub destination: String,
+    /// Action when this rule matches.
+    pub action: PolicyAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SecuritySettings {
     pub capture_process_exec: bool,
     pub capture_command_line: bool,
+    /// Ordered list of file path rules. First match wins.
+    pub file_path_rules: Vec<FilePathRule>,
+    /// Ordered list of process execution rules. First match wins.
+    pub process_rules: Vec<ProcessRule>,
+    /// Ordered list of network destination rules. First match wins.
+    pub network_rules: Vec<NetworkRule>,
+}
+
+impl SecuritySettings {
+    /// Returns the policy action for a file path.
+    /// Returns `PolicyAction::Allow` when no rule matches.
+    #[must_use]
+    pub fn file_policy(&self, path: &str) -> PolicyAction {
+        self.file_path_rules
+            .iter()
+            .find(|r| path.starts_with(&r.prefix))
+            .map_or(PolicyAction::Allow, |r| r.action)
+    }
+
+    /// Returns the policy action for a process comm name.
+    /// Returns `PolicyAction::Allow` when no rule matches.
+    #[must_use]
+    pub fn process_policy(&self, comm: &str) -> PolicyAction {
+        self.process_rules
+            .iter()
+            .find(|r| comm == r.comm)
+            .map_or(PolicyAction::Allow, |r| r.action)
+    }
+
+    /// Returns the policy action for a network destination.
+    /// Returns `PolicyAction::Allow` when no rule matches.
+    #[must_use]
+    pub fn network_policy(&self, destination: &str) -> PolicyAction {
+        self.network_rules
+            .iter()
+            .find(|r| destination.starts_with(&r.destination))
+            .map_or(PolicyAction::Allow, |r| r.action)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -416,6 +493,7 @@ impl RawConfig {
             otlp: OtlpSettings {
                 endpoint: self.otlp.endpoint.unwrap_or(defaults.otlp.endpoint),
             },
+
             security: SecuritySettings {
                 capture_process_exec: self
                     .security
@@ -425,6 +503,9 @@ impl RawConfig {
                     .security
                     .capture_command_line
                     .unwrap_or(defaults.security.capture_command_line),
+                file_path_rules: Vec::new(),
+                process_rules: Vec::new(),
+                network_rules: Vec::new(),
             },
             logging: LoggingSettings {
                 level: self.logging.level.unwrap_or(defaults.logging.level),
