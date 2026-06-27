@@ -1,19 +1,29 @@
+#[cfg(target_os = "linux")]
 use aya::Ebpf;
+#[cfg(target_os = "linux")]
 use aya::maps::{MapData, RingBuf};
+#[cfg(target_os = "linux")]
 use prism_core::events::security::{FileAccessEvent, NetworkConnectionEvent, ProcessExecEvent};
 use tokio_util::sync::CancellationToken;
+#[cfg(target_os = "linux")]
 use tracing::{info, warn};
 
 use crate::config::SecuritySettings;
 use crate::runtime::RuntimeError;
 
+#[cfg(target_os = "linux")]
 const SECURITY_RING_BUF_NAME: &str = "SECURITY_EVENTS";
+#[cfg(target_os = "linux")]
 const FILE_ACCESS_RING_BUF_NAME: &str = "FILE_ACCESS_EVENTS";
+#[cfg(target_os = "linux")]
 const NETWORK_SECURITY_RING_BUF_NAME: &str = "NETWORK_SECURITY_EVENTS";
 
 /// Maximum allowed byte length for string fields before truncation.
+#[cfg(target_os = "linux")]
 const MAX_COMM_LEN: usize = 16;
+#[cfg(target_os = "linux")]
 const MAX_PATH_LEN: usize = 128;
+#[cfg(target_os = "linux")]
 const MAX_EVENT_BYTES: usize = 512;
 
 /// Reads security audit events from eBPF ring buffers, applies field policy
@@ -23,6 +33,7 @@ const MAX_EVENT_BYTES: usize = 512;
 ///
 /// Returns an error when a ring buffer map cannot be found in the loaded
 /// eBPF object.
+#[cfg(target_os = "linux")]
 pub async fn run_security_processor(
     ebpf: &mut Ebpf,
     token: CancellationToken,
@@ -96,10 +107,28 @@ pub async fn run_security_processor(
     Ok(())
 }
 
+/// Reports that security processing requires Linux eBPF support.
+///
+/// # Errors
+///
+/// Always returns [`RuntimeError`] outside Linux.
+#[cfg(not(target_os = "linux"))]
+pub async fn run_security_processor(
+    _ebpf: &mut (),
+    _token: CancellationToken,
+    _settings: SecuritySettings,
+) -> Result<(), RuntimeError> {
+    Err(RuntimeError::task_failed(
+        "security-processor",
+        "security processor requires Linux eBPF support",
+    ))
+}
+
 /// Sanitises a raw byte slice into a printable string.
 ///
 /// Non-UTF-8 bytes are replaced with the Unicode replacement character so
 /// no raw binary data reaches the log output.
+#[cfg(any(target_os = "linux", test))]
 fn sanitise_field(raw: &[u8], max_len: usize) -> String {
     let capped = &raw[..raw.len().min(max_len)];
     let s = String::from_utf8_lossy(capped);
@@ -107,6 +136,7 @@ fn sanitise_field(raw: &[u8], max_len: usize) -> String {
     s.trim_end_matches('\0').to_owned()
 }
 
+#[cfg(target_os = "linux")]
 fn process_exec_events(ring: &mut RingBuf<MapData>, settings: &SecuritySettings) {
     while let Some(item) = ring.next() {
         let bytes = item.as_ref();
@@ -169,6 +199,7 @@ fn process_exec_events(ring: &mut RingBuf<MapData>, settings: &SecuritySettings)
     }
 }
 
+#[cfg(target_os = "linux")]
 fn process_file_access_events(ring: &mut RingBuf<MapData>) {
     while let Some(item) = ring.next() {
         let bytes = item.as_ref();
@@ -209,6 +240,7 @@ fn process_file_access_events(ring: &mut RingBuf<MapData>) {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn process_network_events(ring: &mut RingBuf<MapData>) {
     while let Some(item) = ring.next() {
         let bytes = item.as_ref();
