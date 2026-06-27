@@ -33,7 +33,7 @@ impl OtlpLogsExporter {
     }
 
     /// Exports a `ProcessExecEvent` as an OTLP log record.
-    pub fn export_exec_event(&self, event: &ProcessExecEvent, settings: SecuritySettings) {
+    pub fn export_exec_event(&self, event: &ProcessExecEvent, settings: &SecuritySettings) {
         if !settings.capture_process_exec {
             return;
         }

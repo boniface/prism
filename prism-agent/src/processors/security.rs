@@ -85,7 +85,7 @@ pub async fn run_security_processor(
             }
             () = tokio::time::sleep(tokio::time::Duration::from_millis(10)) => {
                 if settings.capture_process_exec {
-                    process_exec_events(&mut exec_ring, settings);
+                    process_exec_events(&mut exec_ring, &settings);
                 }
                 process_file_access_events(&mut file_ring);
                 process_network_events(&mut network_ring);
@@ -107,7 +107,7 @@ fn sanitise_field(raw: &[u8], max_len: usize) -> String {
     s.trim_end_matches('\0').to_owned()
 }
 
-fn process_exec_events(ring: &mut RingBuf<MapData>, settings: SecuritySettings) {
+fn process_exec_events(ring: &mut RingBuf<MapData>, settings: &SecuritySettings) {
     while let Some(item) = ring.next() {
         let bytes = item.as_ref();
 
@@ -296,6 +296,9 @@ mod tests {
         let settings = SecuritySettings {
             capture_process_exec: false,
             capture_command_line: false,
+            file_path_rules: Vec::new(),
+            process_rules: Vec::new(),
+            network_rules: Vec::new(),
         };
         // When capture_process_exec is false the processor skips the ring.
         assert!(!settings.capture_process_exec);
@@ -306,6 +309,9 @@ mod tests {
         let settings = SecuritySettings {
             capture_process_exec: true,
             capture_command_line: false,
+            file_path_rules: Vec::new(),
+            process_rules: Vec::new(),
+            network_rules: Vec::new(),
         };
         assert!(!settings.capture_command_line);
     }
