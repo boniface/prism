@@ -8,6 +8,7 @@ Type=simple
 ExecStart=/usr/bin/prism-agent --config /etc/prism/config.yaml
 Restart=on-failure
 RestartSec=5s
+KillSignal=SIGTERM
 TimeoutStopSec=30s
 ReadWritePaths=/sys/fs/bpf
 NoNewPrivileges=true
