@@ -1,0 +1,100 @@
+name: Chaos Soak
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "Soak profile to run"
+        required: true
+        default: smoke
+        type: choice
+        options:
+          - smoke
+          - 24h
+  pull_request:
+    paths:
+      - ".github/workflows/chaos-soak.yml"
+      - "Makefile"
+      - "prism-agent/**"
+      - "prism-core/**"
+      - "prism-ebpf/**"
+      - "scripts/chaos-soak.sh"
+      - "docs/chaos-soak-tests.md"
+  schedule:
+    - cron: "0 3 * * 0"
+
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rust-src
+          targets: x86_64-unknown-linux-musl
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - name: Use stable by default
+        run: rustup default stable
+
+      - name: Install system tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm linux-tools-common linux-tools-generic musl-tools
+
+      - name: Install bpf-linker
+        run: cargo install bpf-linker --locked
+
+      - name: Run chaos smoke
+        env:
+          PRISM_SOAK_PROFILE: smoke
+          PRISM_CHAOS_LOG_DIR: target/chaos-soak-logs/smoke
+        run: make chaos-smoke
+
+      - name: Upload chaos smoke logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos-soak-smoke
+          path: target/chaos-soak-logs/smoke
+          if-no-files-found: warn
+
+  soak-24h:
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.profile == '24h')
+    runs-on: [self-hosted, linux, prism-chaos]
+    timeout-minutes: 1500
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rust-src
+          targets: x86_64-unknown-linux-musl
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - name: Use stable by default
+        run: rustup default stable
+
+      - name: Run 24h soak
+        env:
+          PRISM_SOAK_PROFILE: ${{ github.event.inputs.profile || '24h' }}
+          PRISM_CHAOS_REQUIRED: "1"
+          PRISM_CHAOS_LOG_DIR: target/chaos-soak-logs/24h
+        run: make chaos-smoke
+
+      - name: Upload 24h soak logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos-soak-24h
+          path: target/chaos-soak-logs/24h
+          if-no-files-found: warn
