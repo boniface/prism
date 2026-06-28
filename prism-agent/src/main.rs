@@ -1,12 +1,14 @@
 use anyhow::{Context, Result};
+#[cfg(target_os = "linux")]
+use prism_agent::processors::run_security_processor;
 use prism_agent::{
     bpf::{LoadedBpf, reconcile_stale_pins},
     config::AgentConfig,
     metrics::{BpfMetricSource, MetricSnapshotSource, PrometheusServer},
-    processors::run_security_processor,
     runtime::{ManagedTaskRuntime, TaskRuntimeConfig},
 };
 use std::sync::Arc;
+#[cfg(target_os = "linux")]
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
@@ -38,7 +40,7 @@ async fn main() -> Result<()> {
     let shutdown = CancellationToken::new();
     let prometheus_task = tokio::spawn(prometheus.run(shutdown.clone()));
 
-    let mut runtime = ManagedTaskRuntime::new(TaskRuntimeConfig::default());
+    let runtime = ManagedTaskRuntime::new(TaskRuntimeConfig::default());
     let token = runtime.cancellation_token();
 
     #[cfg(target_os = "linux")]
