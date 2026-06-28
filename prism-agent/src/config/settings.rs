@@ -336,6 +336,17 @@ pub enum PolicyAction {
     Deny,
 }
 
+impl PolicyAction {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Allow => "allow",
+            Self::Alert => "alert",
+            Self::Deny => "deny",
+        }
+    }
+}
+
 /// A rule that matches a file path prefix.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -366,6 +377,40 @@ pub struct NetworkRule {
     pub action: PolicyAction,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PolicyRuleMatch {
+    action: PolicyAction,
+    rule_index: Option<usize>,
+}
+
+impl PolicyRuleMatch {
+    #[must_use]
+    pub const fn matched(action: PolicyAction, rule_index: usize) -> Self {
+        Self {
+            action,
+            rule_index: Some(rule_index),
+        }
+    }
+
+    #[must_use]
+    pub const fn unmatched() -> Self {
+        Self {
+            action: PolicyAction::Allow,
+            rule_index: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn action(self) -> PolicyAction {
+        self.action
+    }
+
+    #[must_use]
+    pub const fn rule_index(self) -> Option<usize> {
+        self.rule_index
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SecuritySettings {
     pub capture_process_exec: bool,
@@ -383,30 +428,54 @@ impl SecuritySettings {
     /// Returns `PolicyAction::Allow` when no rule matches.
     #[must_use]
     pub fn file_policy(&self, path: &str) -> PolicyAction {
+        self.file_policy_match(path).action()
+    }
+
+    #[must_use]
+    pub fn file_policy_match(&self, path: &str) -> PolicyRuleMatch {
         self.file_path_rules
             .iter()
-            .find(|r| path.starts_with(&r.prefix))
-            .map_or(PolicyAction::Allow, |r| r.action)
+            .enumerate()
+            .find(|(_, rule)| path.starts_with(&rule.prefix))
+            .map_or_else(PolicyRuleMatch::unmatched, |(index, rule)| {
+                PolicyRuleMatch::matched(rule.action, index)
+            })
     }
 
     /// Returns the policy action for a process comm name.
     /// Returns `PolicyAction::Allow` when no rule matches.
     #[must_use]
     pub fn process_policy(&self, comm: &str) -> PolicyAction {
+        self.process_policy_match(comm).action()
+    }
+
+    #[must_use]
+    pub fn process_policy_match(&self, comm: &str) -> PolicyRuleMatch {
         self.process_rules
             .iter()
-            .find(|r| comm == r.comm)
-            .map_or(PolicyAction::Allow, |r| r.action)
+            .enumerate()
+            .find(|(_, rule)| comm == rule.comm)
+            .map_or_else(PolicyRuleMatch::unmatched, |(index, rule)| {
+                PolicyRuleMatch::matched(rule.action, index)
+            })
     }
 
     /// Returns the policy action for a network destination.
     /// Returns `PolicyAction::Allow` when no rule matches.
     #[must_use]
     pub fn network_policy(&self, destination: &str) -> PolicyAction {
+        self.network_policy_match(destination).action()
+    }
+
+    #[must_use]
+    pub fn network_policy_match(&self, destination: &str) -> PolicyRuleMatch {
         self.network_rules
             .iter()
-            .find(|r| destination.starts_with(&r.destination))
-            .map_or(PolicyAction::Allow, |r| r.action)
+            .enumerate()
+            .find(|(_, rule)| destination.starts_with(&rule.destination))
+            .map_or_else(PolicyRuleMatch::unmatched, |(index, rule)| {
+                PolicyRuleMatch::matched(rule.action, index)
+            })
     }
 }
 
@@ -1602,6 +1671,18 @@ security:
         );
         assert_eq!(settings.process_policy("bash"), PolicyAction::Alert);
         assert_eq!(settings.network_policy("10.0.0.8:443"), PolicyAction::Alert);
+        assert_eq!(
+            settings.file_policy_match("/var/log/auth.log"),
+            PolicyRuleMatch::matched(PolicyAction::Alert, 0)
+        );
+        assert_eq!(
+            settings.process_policy_match("bash"),
+            PolicyRuleMatch::matched(PolicyAction::Alert, 0)
+        );
+        assert_eq!(
+            settings.network_policy_match("10.0.0.8:443"),
+            PolicyRuleMatch::matched(PolicyAction::Alert, 0)
+        );
     }
 
     #[test]

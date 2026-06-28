@@ -10,6 +10,10 @@ use tracing::{info, warn};
 
 use crate::config::SecuritySettings;
 use crate::runtime::RuntimeError;
+#[cfg(target_os = "linux")]
+use crate::security::{
+    PolicyMatchContext, PolicyRuleFamily, SecurityEventKind, SecurityEventMetadata,
+};
 
 #[cfg(target_os = "linux")]
 const SECURITY_RING_BUF_NAME: &str = "SECURITY_EVENTS";
@@ -98,8 +102,8 @@ pub async fn run_security_processor(
                 if settings.capture_process_exec {
                     process_exec_events(&mut exec_ring, &settings);
                 }
-                process_file_access_events(&mut file_ring);
-                process_network_events(&mut network_ring);
+                process_file_access_events(&mut file_ring, &settings);
+                process_network_events(&mut network_ring, &settings);
             }
         }
     }
@@ -165,6 +169,13 @@ fn process_exec_events(ring: &mut RingBuf<MapData>, settings: &SecuritySettings)
 
         let comm_len = (event.comm_len as usize).min(MAX_COMM_LEN);
         let comm = sanitise_field(&event.comm[..comm_len], MAX_COMM_LEN);
+        let metadata = SecurityEventMetadata::new(
+            SecurityEventKind::ProcessExec,
+            PolicyMatchContext::new(
+                PolicyRuleFamily::Process,
+                settings.process_policy_match(&comm),
+            ),
+        );
 
         // Only include exe_path when command line capture is explicitly enabled.
         let exe_path = if settings.capture_command_line {
@@ -176,6 +187,12 @@ fn process_exec_events(ring: &mut RingBuf<MapData>, settings: &SecuritySettings)
 
         if settings.capture_command_line && !exe_path.is_empty() {
             info!(
+                event_id = metadata.kind().stable_id(),
+                event_category = metadata.kind().category().as_str(),
+                severity = metadata.severity().as_str(),
+                policy_action = metadata.policy().action().as_str(),
+                policy_rule_family = policy_rule_family(metadata.policy()),
+                policy_rule_index = ?metadata.policy().rule_index(),
                 pid = event.pid,
                 ppid = event.ppid,
                 uid = event.uid,
@@ -187,6 +204,12 @@ fn process_exec_events(ring: &mut RingBuf<MapData>, settings: &SecuritySettings)
             );
         } else {
             info!(
+                event_id = metadata.kind().stable_id(),
+                event_category = metadata.kind().category().as_str(),
+                severity = metadata.severity().as_str(),
+                policy_action = metadata.policy().action().as_str(),
+                policy_rule_family = policy_rule_family(metadata.policy()),
+                policy_rule_index = ?metadata.policy().rule_index(),
                 pid = event.pid,
                 ppid = event.ppid,
                 uid = event.uid,
@@ -200,7 +223,7 @@ fn process_exec_events(ring: &mut RingBuf<MapData>, settings: &SecuritySettings)
 }
 
 #[cfg(target_os = "linux")]
-fn process_file_access_events(ring: &mut RingBuf<MapData>) {
+fn process_file_access_events(ring: &mut RingBuf<MapData>, settings: &SecuritySettings) {
     while let Some(item) = ring.next() {
         let bytes = item.as_ref();
 
@@ -228,8 +251,21 @@ fn process_file_access_events(ring: &mut RingBuf<MapData>) {
 
         let path_len = (event.path_len as usize).min(MAX_PATH_LEN);
         let path = sanitise_field(&event.path[..path_len], MAX_PATH_LEN);
+        let metadata = SecurityEventMetadata::new(
+            SecurityEventKind::FileAccess,
+            PolicyMatchContext::new(
+                PolicyRuleFamily::FilePath,
+                settings.file_policy_match(&path),
+            ),
+        );
 
         info!(
+            event_id = metadata.kind().stable_id(),
+            event_category = metadata.kind().category().as_str(),
+            severity = metadata.severity().as_str(),
+            policy_action = metadata.policy().action().as_str(),
+            policy_rule_family = policy_rule_family(metadata.policy()),
+            policy_rule_index = ?metadata.policy().rule_index(),
             pid = event.pid,
             uid = event.uid,
             cgroup_id = event.cgroup_id,
@@ -241,7 +277,7 @@ fn process_file_access_events(ring: &mut RingBuf<MapData>) {
 }
 
 #[cfg(target_os = "linux")]
-fn process_network_events(ring: &mut RingBuf<MapData>) {
+fn process_network_events(ring: &mut RingBuf<MapData>, settings: &SecuritySettings) {
     while let Some(item) = ring.next() {
         let bytes = item.as_ref();
 
@@ -278,8 +314,21 @@ fn process_network_events(ring: &mut RingBuf<MapData>) {
             event.dst_addr[3],
             event.dst_port,
         );
+        let metadata = SecurityEventMetadata::new(
+            SecurityEventKind::NetworkConnection,
+            PolicyMatchContext::new(
+                PolicyRuleFamily::NetworkDestination,
+                settings.network_policy_match(&dst),
+            ),
+        );
 
         info!(
+            event_id = metadata.kind().stable_id(),
+            event_category = metadata.kind().category().as_str(),
+            severity = metadata.severity().as_str(),
+            policy_action = metadata.policy().action().as_str(),
+            policy_rule_family = policy_rule_family(metadata.policy()),
+            policy_rule_index = ?metadata.policy().rule_index(),
             pid = event.pid,
             uid = event.uid,
             cgroup_id = event.cgroup_id,
@@ -289,6 +338,13 @@ fn process_network_events(ring: &mut RingBuf<MapData>) {
             "network connection event"
         );
     }
+}
+
+#[cfg(target_os = "linux")]
+fn policy_rule_family(policy: PolicyMatchContext) -> &'static str {
+    policy
+        .rule_family()
+        .map_or("none", PolicyRuleFamily::as_str)
 }
 
 #[cfg(test)]
