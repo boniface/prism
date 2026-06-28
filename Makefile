@@ -23,7 +23,7 @@ else
 USER_BUILD_ARGS := --target $(USER_TARGET)
 endif
 
-.PHONY: audit build ci crash-recovery-smoke dev dist docker-smoke ebpf fmt helm-smoke lint package package-build package-deb package-helm package-rpm package-smoke package-tar perf release-smoke setup test verifier-smoke
+.PHONY: audit build ci crash-recovery-smoke dev dist docker-smoke ebpf fmt helm-smoke lint package package-build package-deb package-helm package-rpm package-smoke package-tar perf platform-smoke release-smoke setup test verifier-smoke
 
 setup:
 	./scripts/setup-dev.sh
@@ -79,6 +79,9 @@ verifier-smoke:
 
 crash-recovery-smoke:
 	./scripts/crash-recovery-smoke.sh
+
+platform-smoke:
+	./scripts/platform-smoke.sh
 
 package-build: ebpf
 	$(CARGO) +$(STABLE) build -p prism-agent --release --target $(DIST_TARGET)
