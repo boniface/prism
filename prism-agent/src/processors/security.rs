@@ -30,7 +30,6 @@ const NETWORK_SECURITY_RING_BUF_NAME: &str = "NETWORK_SECURITY_EVENTS";
 const MAX_COMM_LEN: usize = 16;
 #[cfg(target_os = "linux")]
 const MAX_PATH_LEN: usize = 128;
-#[cfg(target_os = "linux")]
 
 /// Reads security audit events from eBPF ring buffers, applies field policy
 /// and redaction, then logs them.
@@ -194,7 +193,7 @@ fn process_exec_events(ring: &mut RingBuf<MapData>, settings: &SecuritySettings)
                 SecurityEventField::ExecutablePath,
                 &exe_path,
             )
-            .map(|field| field.into_owned())
+            .map(std::borrow::Cow::into_owned)
         } else {
             None
         };
