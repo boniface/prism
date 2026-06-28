@@ -40,6 +40,9 @@ async fn main() -> Result<()> {
     let shutdown = CancellationToken::new();
     let prometheus_task = tokio::spawn(prometheus.run(shutdown.clone()));
 
+    #[cfg(target_os = "linux")]
+    let mut runtime = ManagedTaskRuntime::new(TaskRuntimeConfig::default());
+    #[cfg(not(target_os = "linux"))]
     let runtime = ManagedTaskRuntime::new(TaskRuntimeConfig::default());
     let token = runtime.cancellation_token();
 
