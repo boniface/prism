@@ -101,6 +101,8 @@ jobs:
   build:
     needs: validate
     runs-on: ubuntu-24.04
+    environment:
+      name: ${{ inputs.channel == 'stable' && 'stable-release' || 'prerelease-release' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -160,10 +162,9 @@ jobs:
           cd target/dist
           sha256sum * > SHA256SUMS
 
-      - name: Keyless sign artifacts when available
+      - name: Keyless sign release artifacts
         continue-on-error: ${{ inputs.channel != 'stable' }}
-        run: |
-          cosign sign-blob --yes --bundle target/dist/SHA256SUMS.bundle target/dist/SHA256SUMS
+        run: ./scripts/sign-release-artifacts.sh target/dist
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
