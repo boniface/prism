@@ -23,7 +23,7 @@ else
 USER_BUILD_ARGS := --target $(USER_TARGET)
 endif
 
-.PHONY: audit build ci dev dist ebpf fmt lint package package-build package-deb package-helm package-rpm package-tar perf setup test
+.PHONY: audit build ci dev dist docker-smoke ebpf fmt lint package package-build package-deb package-helm package-rpm package-tar perf setup test
 
 setup:
 	./scripts/setup-dev.sh
@@ -59,6 +59,9 @@ audit:
 	$(CARGO) +$(STABLE) deny check bans licenses sources
 
 ci: fmt lint test ebpf audit
+
+docker-smoke:
+	./scripts/docker-compose-smoke.sh
 
 package: package-tar
 
