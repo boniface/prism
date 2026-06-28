@@ -35,6 +35,10 @@ impl<T> KernelEventReceiver<T> {
         self.receiver.recv().await
     }
 
+    pub fn close(&mut self) {
+        self.receiver.close();
+    }
+
     /// Closes the receiver and drains queued events before the timeout.
     ///
     /// # Errors
