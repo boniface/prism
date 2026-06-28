@@ -34,6 +34,8 @@ const ENV_CAPTURE_PROCESS_EXEC: &str = "PRISM_CAPTURE_PROCESS_EXEC";
 const ENV_CAPTURE_COMMAND_LINE: &str = "PRISM_CAPTURE_COMMAND_LINE";
 const ENV_POSTGRES_TELEMETRY_ENABLED: &str = "PRISM_POSTGRES_TELEMETRY_ENABLED";
 const ENV_REDIS_TELEMETRY_ENABLED: &str = "PRISM_REDIS_TELEMETRY_ENABLED";
+const ENV_TRACE_CREATE_ROOT_SPANS: &str = "PRISM_TRACE_CREATE_ROOT_SPANS";
+const ENV_TRACE_SPAN_QUEUE_CAPACITY: &str = "PRISM_TRACE_SPAN_QUEUE_CAPACITY";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentConfig {
@@ -45,6 +47,7 @@ pub struct AgentConfig {
     pub otlp: OtlpSettings,
     pub security: SecuritySettings,
     pub application_telemetry: ApplicationTelemetrySettings,
+    pub trace: TraceSettings,
     pub logging: LoggingSettings,
 }
 
@@ -135,6 +138,12 @@ impl AgentConfig {
                 reason: "must be greater than zero",
             });
         }
+        if self.trace.span_queue_capacity == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "trace.span_queue_capacity",
+                reason: "must be greater than zero",
+            });
+        }
         if !self.prometheus.expensive_dimensions_enabled
             && self
                 .prometheus
@@ -163,6 +172,7 @@ impl Default for AgentConfig {
             otlp: OtlpSettings::default(),
             security: SecuritySettings::default(),
             application_telemetry: ApplicationTelemetrySettings::default(),
+            trace: TraceSettings::default(),
             logging: LoggingSettings::default(),
         }
     }
@@ -365,6 +375,21 @@ pub struct ApplicationTelemetrySettings {
     pub redis_enabled: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TraceSettings {
+    pub create_root_spans: bool,
+    pub span_queue_capacity: usize,
+}
+
+impl Default for TraceSettings {
+    fn default() -> Self {
+        Self {
+            create_root_spans: false,
+            span_queue_capacity: 1024,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoggingSettings {
     pub level: String,
@@ -425,6 +450,7 @@ struct RawConfig {
     otlp: RawOtlpSettings,
     security: RawSecuritySettings,
     application_telemetry: RawApplicationTelemetrySettings,
+    trace: RawTraceSettings,
     logging: RawLoggingSettings,
 }
 
@@ -528,6 +554,16 @@ impl RawConfig {
                     .redis_enabled
                     .unwrap_or(defaults.application_telemetry.redis_enabled),
             },
+            trace: TraceSettings {
+                create_root_spans: self
+                    .trace
+                    .create_root_spans
+                    .unwrap_or(defaults.trace.create_root_spans),
+                span_queue_capacity: self
+                    .trace
+                    .span_queue_capacity
+                    .unwrap_or(defaults.trace.span_queue_capacity),
+            },
             logging: LoggingSettings {
                 level: self.logging.level.unwrap_or(defaults.logging.level),
             },
@@ -591,6 +627,13 @@ struct RawSecuritySettings {
 struct RawApplicationTelemetrySettings {
     postgres_enabled: Option<bool>,
     redis_enabled: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct RawTraceSettings {
+    create_root_spans: Option<bool>,
+    span_queue_capacity: Option<usize>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -678,6 +721,14 @@ impl EnvOverrides {
         self.apply_bool(
             ENV_REDIS_TELEMETRY_ENABLED,
             &mut config.application_telemetry.redis_enabled,
+        )?;
+        self.apply_bool(
+            ENV_TRACE_CREATE_ROOT_SPANS,
+            &mut config.trace.create_root_spans,
+        )?;
+        self.apply_usize(
+            ENV_TRACE_SPAN_QUEUE_CAPACITY,
+            &mut config.trace.span_queue_capacity,
         )?;
         Ok(())
     }
@@ -888,6 +939,8 @@ mod tests {
         assert_eq!(config.prometheus.series_limit, 10_000);
         assert!(!config.application_telemetry.postgres_enabled);
         assert!(!config.application_telemetry.redis_enabled);
+        assert!(!config.trace.create_root_spans);
+        assert_eq!(config.trace.span_queue_capacity, 1024);
     }
 
     #[test]
@@ -928,6 +981,9 @@ security:
 application_telemetry:
   postgres_enabled: true
   redis_enabled: false
+trace:
+  create_root_spans: true
+  span_queue_capacity: 128
 logging:
   level: debug
 ",
@@ -969,6 +1025,8 @@ logging:
         assert!(config.security.capture_command_line);
         assert!(config.application_telemetry.postgres_enabled);
         assert!(!config.application_telemetry.redis_enabled);
+        assert!(config.trace.create_root_spans);
+        assert_eq!(config.trace.span_queue_capacity, 128);
         assert_eq!(config.logging.level, "debug");
     }
 
@@ -1013,6 +1071,8 @@ prometheus:
                 (ENV_CAPTURE_COMMAND_LINE, "true"),
                 (ENV_POSTGRES_TELEMETRY_ENABLED, "true"),
                 (ENV_REDIS_TELEMETRY_ENABLED, "true"),
+                (ENV_TRACE_CREATE_ROOT_SPANS, "true"),
+                (ENV_TRACE_SPAN_QUEUE_CAPACITY, "256"),
             ],
         )
         .expect("config should load");
@@ -1043,6 +1103,8 @@ prometheus:
         assert!(config.security.capture_command_line);
         assert!(config.application_telemetry.postgres_enabled);
         assert!(config.application_telemetry.redis_enabled);
+        assert!(config.trace.create_root_spans);
+        assert_eq!(config.trace.span_queue_capacity, 256);
     }
 
     #[test]
@@ -1133,6 +1195,31 @@ prometheus:
             ConfigError::InvalidValue {
                 field: "prometheus.label_allowlist",
                 reason: "high-cardinality labels require expensive_dimensions_enabled"
+            }
+        ));
+    }
+
+    #[test]
+    fn trace_queue_capacity_must_be_non_zero() {
+        let temp_dir = TempDir::new().expect("tempdir should be created");
+        let path = temp_dir.path().join("config.yaml");
+        fs::write(
+            &path,
+            r"
+trace:
+  span_queue_capacity: 0
+",
+        )
+        .expect("config should be written");
+
+        let error = AgentConfig::load_with_test_env(&path, ConfigPathMode::Required, &[])
+            .expect_err("zero trace queue capacity should fail");
+
+        assert!(matches!(
+            error,
+            ConfigError::InvalidValue {
+                field: "trace.span_queue_capacity",
+                reason: "must be greater than zero"
             }
         ));
     }
