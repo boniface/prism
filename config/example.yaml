@@ -24,6 +24,9 @@ prometheus:
 
 otlp:
   endpoint: http://127.0.0.1:4317
+  trace_batch_size: 64
+  trace_retry_attempts: 3
+  trace_shutdown_timeout_ms: 5000
 
 security:
   capture_process_exec: true

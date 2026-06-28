@@ -29,6 +29,9 @@ const ENV_PROMETHEUS_SERIES_LIMIT: &str = "PRISM_PROMETHEUS_SERIES_LIMIT";
 const ENV_NETWORK_TC_HOOKS_ENABLED: &str = "PRISM_NETWORK_TC_HOOKS_ENABLED";
 const ENV_NETWORK_TC_INTERFACES: &str = "PRISM_NETWORK_TC_INTERFACES";
 const ENV_OTLP_ENDPOINT: &str = "PRISM_OTLP_ENDPOINT";
+const ENV_OTLP_TRACE_BATCH_SIZE: &str = "PRISM_OTLP_TRACE_BATCH_SIZE";
+const ENV_OTLP_TRACE_RETRY_ATTEMPTS: &str = "PRISM_OTLP_TRACE_RETRY_ATTEMPTS";
+const ENV_OTLP_TRACE_SHUTDOWN_TIMEOUT_MS: &str = "PRISM_OTLP_TRACE_SHUTDOWN_TIMEOUT_MS";
 const ENV_LOG_LEVEL: &str = "PRISM_LOG_LEVEL";
 const ENV_CAPTURE_PROCESS_EXEC: &str = "PRISM_CAPTURE_PROCESS_EXEC";
 const ENV_CAPTURE_COMMAND_LINE: &str = "PRISM_CAPTURE_COMMAND_LINE";
@@ -108,6 +111,24 @@ impl AgentConfig {
         ensure_non_empty("otlp.endpoint", &self.otlp.endpoint)?;
         ensure_non_empty("logging.level", &self.logging.level)?;
 
+        if self.otlp.trace_batch_size == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "otlp.trace_batch_size",
+                reason: "must be greater than zero",
+            });
+        }
+        if self.otlp.trace_retry_attempts == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "otlp.trace_retry_attempts",
+                reason: "must be greater than zero",
+            });
+        }
+        if self.otlp.trace_shutdown_timeout_ms == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "otlp.trace_shutdown_timeout_ms",
+                reason: "must be greater than zero",
+            });
+        }
         if self.metadata.providers.is_empty() {
             return Err(ConfigError::MissingRequired {
                 field: "metadata.providers",
@@ -285,12 +306,18 @@ impl PrometheusLabel {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OtlpSettings {
     pub endpoint: String,
+    pub trace_batch_size: usize,
+    pub trace_retry_attempts: usize,
+    pub trace_shutdown_timeout_ms: u64,
 }
 
 impl Default for OtlpSettings {
     fn default() -> Self {
         Self {
             endpoint: "http://127.0.0.1:4317".to_owned(),
+            trace_batch_size: 64,
+            trace_retry_attempts: 3,
+            trace_shutdown_timeout_ms: 5_000,
         }
     }
 }
@@ -629,12 +656,22 @@ impl RawPrometheusSettings {
 #[serde(default, deny_unknown_fields)]
 struct RawOtlpSettings {
     endpoint: Option<String>,
+    trace_batch_size: Option<usize>,
+    trace_retry_attempts: Option<usize>,
+    trace_shutdown_timeout_ms: Option<u64>,
 }
 
 impl RawOtlpSettings {
     fn into_settings(self, defaults: OtlpSettings) -> OtlpSettings {
         OtlpSettings {
             endpoint: self.endpoint.unwrap_or(defaults.endpoint),
+            trace_batch_size: self.trace_batch_size.unwrap_or(defaults.trace_batch_size),
+            trace_retry_attempts: self
+                .trace_retry_attempts
+                .unwrap_or(defaults.trace_retry_attempts),
+            trace_shutdown_timeout_ms: self
+                .trace_shutdown_timeout_ms
+                .unwrap_or(defaults.trace_shutdown_timeout_ms),
         }
     }
 }
@@ -789,6 +826,15 @@ impl EnvOverrides {
         )?;
         self.apply_string_list(ENV_NETWORK_TC_INTERFACES, &mut config.network.tc_interfaces)?;
         self.apply_string(ENV_OTLP_ENDPOINT, &mut config.otlp.endpoint)?;
+        self.apply_usize(ENV_OTLP_TRACE_BATCH_SIZE, &mut config.otlp.trace_batch_size)?;
+        self.apply_usize(
+            ENV_OTLP_TRACE_RETRY_ATTEMPTS,
+            &mut config.otlp.trace_retry_attempts,
+        )?;
+        self.apply_u64(
+            ENV_OTLP_TRACE_SHUTDOWN_TIMEOUT_MS,
+            &mut config.otlp.trace_shutdown_timeout_ms,
+        )?;
         self.apply_string(ENV_LOG_LEVEL, &mut config.logging.level)?;
         self.apply_bool(
             ENV_CAPTURE_PROCESS_EXEC,
@@ -852,6 +898,17 @@ impl EnvOverrides {
     }
 
     fn apply_usize(&self, name: &'static str, target: &mut usize) -> Result<(), ConfigError> {
+        if let Some(value) = self.value(name)? {
+            *target = value.parse().map_err(|_| ConfigError::InvalidEnv {
+                name,
+                reason: "expected unsigned integer",
+            })?;
+        }
+
+        Ok(())
+    }
+
+    fn apply_u64(&self, name: &'static str, target: &mut u64) -> Result<(), ConfigError> {
         if let Some(value) = self.value(name)? {
             *target = value.parse().map_err(|_| ConfigError::InvalidEnv {
                 name,
@@ -1055,6 +1112,9 @@ mod tests {
         assert_eq!(config.prometheus.max_label_value_len, 128);
         assert!(!config.prometheus.expensive_dimensions_enabled);
         assert_eq!(config.prometheus.series_limit, 10_000);
+        assert_eq!(config.otlp.trace_batch_size, 64);
+        assert_eq!(config.otlp.trace_retry_attempts, 3);
+        assert_eq!(config.otlp.trace_shutdown_timeout_ms, 5_000);
         assert!(!config.application_telemetry.postgres_enabled);
         assert!(!config.application_telemetry.redis_enabled);
         assert!(!config.trace.create_root_spans);
@@ -1098,6 +1158,9 @@ prometheus:
   series_limit: 500
 otlp:
   endpoint: http://collector:4317
+  trace_batch_size: 16
+  trace_retry_attempts: 2
+  trace_shutdown_timeout_ms: 2500
 security:
   capture_process_exec: true
   capture_command_line: true
@@ -1149,6 +1212,9 @@ logging:
         assert!(!config.prometheus.expensive_dimensions_enabled);
         assert_eq!(config.prometheus.series_limit, 500);
         assert_eq!(config.otlp.endpoint, "http://collector:4317");
+        assert_eq!(config.otlp.trace_batch_size, 16);
+        assert_eq!(config.otlp.trace_retry_attempts, 2);
+        assert_eq!(config.otlp.trace_shutdown_timeout_ms, 2_500);
         assert!(config.security.capture_process_exec);
         assert!(config.security.capture_command_line);
         assert!(config.application_telemetry.postgres_enabled);
@@ -1199,6 +1265,9 @@ prometheus:
                 (ENV_NETWORK_TC_HOOKS_ENABLED, "true"),
                 (ENV_NETWORK_TC_INTERFACES, "eth0, lo"),
                 (ENV_OTLP_ENDPOINT, "http://collector:4317"),
+                (ENV_OTLP_TRACE_BATCH_SIZE, "8"),
+                (ENV_OTLP_TRACE_RETRY_ATTEMPTS, "4"),
+                (ENV_OTLP_TRACE_SHUTDOWN_TIMEOUT_MS, "1000"),
                 (ENV_LOG_LEVEL, "trace"),
                 (ENV_CAPTURE_PROCESS_EXEC, "true"),
                 (ENV_CAPTURE_COMMAND_LINE, "true"),
@@ -1233,6 +1302,9 @@ prometheus:
         assert!(config.network.tc_hooks_enabled);
         assert_eq!(config.network.tc_interfaces, vec!["eth0", "lo"]);
         assert_eq!(config.otlp.endpoint, "http://collector:4317");
+        assert_eq!(config.otlp.trace_batch_size, 8);
+        assert_eq!(config.otlp.trace_retry_attempts, 4);
+        assert_eq!(config.otlp.trace_shutdown_timeout_ms, 1_000);
         assert_eq!(config.logging.level, "trace");
         assert!(config.security.capture_process_exec);
         assert!(config.security.capture_command_line);
@@ -1385,6 +1457,31 @@ tls_telemetry:
             error,
             ConfigError::MissingRequired {
                 field: "tls_telemetry.library_allowlist"
+            }
+        ));
+    }
+
+    #[test]
+    fn otlp_trace_batch_size_must_be_non_zero() {
+        let temp_dir = TempDir::new().expect("tempdir should be created");
+        let path = temp_dir.path().join("config.yaml");
+        fs::write(
+            &path,
+            r"
+otlp:
+  trace_batch_size: 0
+",
+        )
+        .expect("config should be written");
+
+        let error = AgentConfig::load_with_test_env(&path, ConfigPathMode::Required, &[])
+            .expect_err("zero trace batch size should fail");
+
+        assert!(matches!(
+            error,
+            ConfigError::InvalidValue {
+                field: "otlp.trace_batch_size",
+                reason: "must be greater than zero"
             }
         ));
     }
