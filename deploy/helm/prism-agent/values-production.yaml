@@ -1,0 +1,44 @@
+image:
+  repository: ghcr.io/boniface/prism-agent
+  tag: 0.1.0-alpha.0
+  pullPolicy: IfNotPresent
+
+prometheus:
+  port: 9090
+
+metadata:
+  providers:
+    - cri
+    - kubernetes
+  criSocketPath: /run/containerd/containerd.sock
+
+kubernetes:
+  apiEnrichment:
+    enabled: true
+  rbac:
+    create: true
+  labelsAllowlist:
+    - app.kubernetes.io/name
+    - app.kubernetes.io/instance
+    - app.kubernetes.io/component
+  annotationsAllowlist:
+    - prism.io/workload
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+securityContext:
+  privileged: false
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+    add:
+      - BPF
+      - PERFMON

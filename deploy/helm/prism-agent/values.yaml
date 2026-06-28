@@ -7,10 +7,13 @@ prometheus:
   port: 9090
 
 metadata:
-  provider: cri
+  providers:
+    - cri
   criSocketPath: /run/containerd/containerd.sock
 
 kubernetes:
+  apiEnrichment:
+    enabled: false
   rbac:
     create: true
   labelsAllowlist:
