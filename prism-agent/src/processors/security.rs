@@ -8,11 +8,14 @@ use tokio_util::sync::CancellationToken;
 #[cfg(target_os = "linux")]
 use tracing::{info, warn};
 
+#[cfg(target_os = "linux")]
+use crate::config::SecurityEventField;
 use crate::config::SecuritySettings;
 use crate::runtime::RuntimeError;
 #[cfg(target_os = "linux")]
 use crate::security::{
     PolicyMatchContext, PolicyRuleFamily, SecurityEventKind, SecurityEventMetadata,
+    controlled_security_field, redact_and_cap_field,
 };
 
 #[cfg(target_os = "linux")]
@@ -28,7 +31,6 @@ const MAX_COMM_LEN: usize = 16;
 #[cfg(target_os = "linux")]
 const MAX_PATH_LEN: usize = 128;
 #[cfg(target_os = "linux")]
-const MAX_EVENT_BYTES: usize = 512;
 
 /// Reads security audit events from eBPF ring buffers, applies field policy
 /// and redaction, then logs them.
@@ -145,10 +147,10 @@ fn process_exec_events(ring: &mut RingBuf<MapData>, settings: &SecuritySettings)
     while let Some(item) = ring.next() {
         let bytes = item.as_ref();
 
-        if bytes.len() > MAX_EVENT_BYTES {
+        if bytes.len() > settings.max_event_bytes {
             warn!(
                 len = bytes.len(),
-                max = MAX_EVENT_BYTES,
+                max = settings.max_event_bytes,
                 "exec event exceeds size cap — skipping"
             );
             continue;
@@ -169,23 +171,35 @@ fn process_exec_events(ring: &mut RingBuf<MapData>, settings: &SecuritySettings)
 
         let comm_len = (event.comm_len as usize).min(MAX_COMM_LEN);
         let comm = sanitise_field(&event.comm[..comm_len], MAX_COMM_LEN);
+        let comm = redact_and_cap_field(
+            &comm,
+            settings.max_field_len.min(MAX_COMM_LEN),
+            &settings.redaction_patterns,
+        );
         let metadata = SecurityEventMetadata::new(
             SecurityEventKind::ProcessExec,
             PolicyMatchContext::new(
                 PolicyRuleFamily::Process,
-                settings.process_policy_match(&comm),
+                settings.process_policy_match(comm.as_ref()),
             ),
         );
 
         // Only include exe_path when command line capture is explicitly enabled.
         let exe_path = if settings.capture_command_line {
             let path_len = (event.exe_path_len as usize).min(MAX_PATH_LEN);
-            sanitise_field(&event.exe_path[..path_len], MAX_PATH_LEN)
+            let exe_path = sanitise_field(&event.exe_path[..path_len], MAX_PATH_LEN);
+            controlled_security_field(
+                settings,
+                SecurityEventKind::ProcessExec,
+                SecurityEventField::ExecutablePath,
+                &exe_path,
+            )
+            .map(|field| field.into_owned())
         } else {
-            String::new()
+            None
         };
 
-        if settings.capture_command_line && !exe_path.is_empty() {
+        if let Some(exe_path) = exe_path.filter(|path| !path.is_empty()) {
             info!(
                 event_id = metadata.kind().stable_id(),
                 event_category = metadata.kind().category().as_str(),
@@ -197,7 +211,7 @@ fn process_exec_events(ring: &mut RingBuf<MapData>, settings: &SecuritySettings)
                 ppid = event.ppid,
                 uid = event.uid,
                 gid = event.gid,
-                comm = %comm,
+                comm = %comm.as_ref(),
                 exe_path = %exe_path,
                 timestamp_ns = event.timestamp_ns,
                 "process exec event"
@@ -214,7 +228,7 @@ fn process_exec_events(ring: &mut RingBuf<MapData>, settings: &SecuritySettings)
                 ppid = event.ppid,
                 uid = event.uid,
                 gid = event.gid,
-                comm = %comm,
+                comm = %comm.as_ref(),
                 timestamp_ns = event.timestamp_ns,
                 "process exec event"
             );
@@ -227,10 +241,10 @@ fn process_file_access_events(ring: &mut RingBuf<MapData>, settings: &SecuritySe
     while let Some(item) = ring.next() {
         let bytes = item.as_ref();
 
-        if bytes.len() > MAX_EVENT_BYTES {
+        if bytes.len() > settings.max_event_bytes {
             warn!(
                 len = bytes.len(),
-                max = MAX_EVENT_BYTES,
+                max = settings.max_event_bytes,
                 "file access event exceeds size cap — skipping"
             );
             continue;
@@ -259,20 +273,41 @@ fn process_file_access_events(ring: &mut RingBuf<MapData>, settings: &SecuritySe
             ),
         );
 
-        info!(
-            event_id = metadata.kind().stable_id(),
-            event_category = metadata.kind().category().as_str(),
-            severity = metadata.severity().as_str(),
-            policy_action = metadata.policy().action().as_str(),
-            policy_rule_family = policy_rule_family(metadata.policy()),
-            policy_rule_index = ?metadata.policy().rule_index(),
-            pid = event.pid,
-            uid = event.uid,
-            cgroup_id = event.cgroup_id,
-            path = %path,
-            timestamp_ns = event.timestamp_ns,
-            "file access event"
-        );
+        if let Some(path) = controlled_security_field(
+            settings,
+            SecurityEventKind::FileAccess,
+            SecurityEventField::FilePath,
+            &path,
+        ) {
+            info!(
+                event_id = metadata.kind().stable_id(),
+                event_category = metadata.kind().category().as_str(),
+                severity = metadata.severity().as_str(),
+                policy_action = metadata.policy().action().as_str(),
+                policy_rule_family = policy_rule_family(metadata.policy()),
+                policy_rule_index = ?metadata.policy().rule_index(),
+                pid = event.pid,
+                uid = event.uid,
+                cgroup_id = event.cgroup_id,
+                path = %path.as_ref(),
+                timestamp_ns = event.timestamp_ns,
+                "file access event"
+            );
+        } else {
+            info!(
+                event_id = metadata.kind().stable_id(),
+                event_category = metadata.kind().category().as_str(),
+                severity = metadata.severity().as_str(),
+                policy_action = metadata.policy().action().as_str(),
+                policy_rule_family = policy_rule_family(metadata.policy()),
+                policy_rule_index = ?metadata.policy().rule_index(),
+                pid = event.pid,
+                uid = event.uid,
+                cgroup_id = event.cgroup_id,
+                timestamp_ns = event.timestamp_ns,
+                "file access event"
+            );
+        }
     }
 }
 
@@ -281,10 +316,10 @@ fn process_network_events(ring: &mut RingBuf<MapData>, settings: &SecuritySettin
     while let Some(item) = ring.next() {
         let bytes = item.as_ref();
 
-        if bytes.len() > MAX_EVENT_BYTES {
+        if bytes.len() > settings.max_event_bytes {
             warn!(
                 len = bytes.len(),
-                max = MAX_EVENT_BYTES,
+                max = settings.max_event_bytes,
                 "network event exceeds size cap — skipping"
             );
             continue;
@@ -305,6 +340,11 @@ fn process_network_events(ring: &mut RingBuf<MapData>, settings: &SecuritySettin
 
         let comm_len = (event.comm_len as usize).min(MAX_COMM_LEN);
         let comm = sanitise_field(&event.comm[..comm_len], MAX_COMM_LEN);
+        let comm = redact_and_cap_field(
+            &comm,
+            settings.max_field_len.min(MAX_COMM_LEN),
+            &settings.redaction_patterns,
+        );
 
         let dst = format!(
             "{}.{}.{}.{}:{}",
@@ -322,21 +362,43 @@ fn process_network_events(ring: &mut RingBuf<MapData>, settings: &SecuritySettin
             ),
         );
 
-        info!(
-            event_id = metadata.kind().stable_id(),
-            event_category = metadata.kind().category().as_str(),
-            severity = metadata.severity().as_str(),
-            policy_action = metadata.policy().action().as_str(),
-            policy_rule_family = policy_rule_family(metadata.policy()),
-            policy_rule_index = ?metadata.policy().rule_index(),
-            pid = event.pid,
-            uid = event.uid,
-            cgroup_id = event.cgroup_id,
-            comm = %comm,
-            dst = %dst,
-            timestamp_ns = event.timestamp_ns,
-            "network connection event"
-        );
+        if let Some(dst) = controlled_security_field(
+            settings,
+            SecurityEventKind::NetworkConnection,
+            SecurityEventField::NetworkDestination,
+            &dst,
+        ) {
+            info!(
+                event_id = metadata.kind().stable_id(),
+                event_category = metadata.kind().category().as_str(),
+                severity = metadata.severity().as_str(),
+                policy_action = metadata.policy().action().as_str(),
+                policy_rule_family = policy_rule_family(metadata.policy()),
+                policy_rule_index = ?metadata.policy().rule_index(),
+                pid = event.pid,
+                uid = event.uid,
+                cgroup_id = event.cgroup_id,
+                comm = %comm.as_ref(),
+                dst = %dst.as_ref(),
+                timestamp_ns = event.timestamp_ns,
+                "network connection event"
+            );
+        } else {
+            info!(
+                event_id = metadata.kind().stable_id(),
+                event_category = metadata.kind().category().as_str(),
+                severity = metadata.severity().as_str(),
+                policy_action = metadata.policy().action().as_str(),
+                policy_rule_family = policy_rule_family(metadata.policy()),
+                policy_rule_index = ?metadata.policy().rule_index(),
+                pid = event.pid,
+                uid = event.uid,
+                cgroup_id = event.cgroup_id,
+                comm = %comm.as_ref(),
+                timestamp_ns = event.timestamp_ns,
+                "network connection event"
+            );
+        }
     }
 }
 
@@ -384,9 +446,7 @@ mod tests {
         let settings = SecuritySettings {
             capture_process_exec: false,
             capture_command_line: false,
-            file_path_rules: Vec::new(),
-            process_rules: Vec::new(),
-            network_rules: Vec::new(),
+            ..SecuritySettings::default()
         };
         // When capture_process_exec is false the processor skips the ring.
         assert!(!settings.capture_process_exec);
@@ -397,9 +457,7 @@ mod tests {
         let settings = SecuritySettings {
             capture_process_exec: true,
             capture_command_line: false,
-            file_path_rules: Vec::new(),
-            process_rules: Vec::new(),
-            network_rules: Vec::new(),
+            ..SecuritySettings::default()
         };
         assert!(!settings.capture_command_line);
     }

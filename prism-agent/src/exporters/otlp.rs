@@ -5,11 +5,11 @@ use prism_core::events::security::{FileAccessEvent, NetworkConnectionEvent, Proc
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
-use crate::config::SecuritySettings;
+use crate::config::{SecurityEventField, SecuritySettings};
 use crate::runtime::RuntimeError;
 use crate::security::{
     PolicyMatchContext, PolicyRuleFamily, SecurityEventKind, SecurityEventMetadata,
-    SecuritySeverity,
+    SecuritySeverity, controlled_security_field, redact_and_cap_field,
 };
 
 /// Exports security audit events through OTLP logs.
@@ -49,11 +49,16 @@ impl OtlpLogsExporter {
         let comm = String::from_utf8_lossy(&event.comm[..comm_len])
             .trim_end_matches('\0')
             .to_owned();
+        let comm = redact_and_cap_field(
+            &comm,
+            settings.max_field_len.min(16),
+            &settings.redaction_patterns,
+        );
         let metadata = SecurityEventMetadata::new(
             SecurityEventKind::ProcessExec,
             PolicyMatchContext::new(
                 PolicyRuleFamily::Process,
-                settings.process_policy_match(&comm),
+                settings.process_policy_match(comm.as_ref()),
             ),
         );
         add_security_metadata(&mut record, metadata);
@@ -62,15 +67,22 @@ impl OtlpLogsExporter {
         record.add_attribute("process.uid", i64::from(event.uid));
         record.add_attribute("process.gid", i64::from(event.gid));
         record.add_attribute("process.cgroup_id", event.cgroup_id.cast_signed());
-        record.add_attribute("process.comm", comm);
+        record.add_attribute("process.comm", comm.to_string());
 
         if settings.capture_command_line {
             let path_len = (event.exe_path_len as usize).min(128);
             let exe_path = String::from_utf8_lossy(&event.exe_path[..path_len])
                 .trim_end_matches('\0')
                 .to_owned();
-            if !exe_path.is_empty() {
-                record.add_attribute("process.exe_path", exe_path);
+            if let Some(exe_path) = controlled_security_field(
+                settings,
+                SecurityEventKind::ProcessExec,
+                SecurityEventField::ExecutablePath,
+                &exe_path,
+            )
+            .filter(|field| !field.is_empty())
+            {
+                record.add_attribute("process.exe_path", exe_path.to_string());
             }
         }
 
@@ -97,7 +109,14 @@ impl OtlpLogsExporter {
         record.add_attribute("process.pid", i64::from(event.pid));
         record.add_attribute("process.uid", i64::from(event.uid));
         record.add_attribute("process.cgroup_id", event.cgroup_id.cast_signed());
-        record.add_attribute("file.path", path);
+        if let Some(path) = controlled_security_field(
+            settings,
+            SecurityEventKind::FileAccess,
+            SecurityEventField::FilePath,
+            &path,
+        ) {
+            record.add_attribute("file.path", path.to_string());
+        }
 
         logger.emit(record);
     }
@@ -115,6 +134,11 @@ impl OtlpLogsExporter {
         let comm = String::from_utf8_lossy(&event.comm[..comm_len])
             .trim_end_matches('\0')
             .to_owned();
+        let comm = redact_and_cap_field(
+            &comm,
+            settings.max_field_len.min(16),
+            &settings.redaction_patterns,
+        );
 
         let dst = format!(
             "{}.{}.{}.{}:{}",
@@ -135,8 +159,15 @@ impl OtlpLogsExporter {
         record.add_attribute("process.pid", i64::from(event.pid));
         record.add_attribute("process.uid", i64::from(event.uid));
         record.add_attribute("process.cgroup_id", event.cgroup_id.cast_signed());
-        record.add_attribute("process.comm", comm);
-        record.add_attribute("network.dst", dst);
+        record.add_attribute("process.comm", comm.to_string());
+        if let Some(dst) = controlled_security_field(
+            settings,
+            SecurityEventKind::NetworkConnection,
+            SecurityEventField::NetworkDestination,
+            &dst,
+        ) {
+            record.add_attribute("network.dst", dst.to_string());
+        }
 
         logger.emit(record);
     }
