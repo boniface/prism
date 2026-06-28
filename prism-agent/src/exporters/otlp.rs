@@ -7,6 +7,10 @@ use tracing::{error, info};
 
 use crate::config::SecuritySettings;
 use crate::runtime::RuntimeError;
+use crate::security::{
+    PolicyMatchContext, PolicyRuleFamily, SecurityEventKind, SecurityEventMetadata,
+    SecuritySeverity,
+};
 
 /// Exports security audit events through OTLP logs.
 pub struct OtlpLogsExporter {
@@ -40,19 +44,24 @@ impl OtlpLogsExporter {
 
         let logger = self.provider.logger("prism-security");
         let mut record = logger.create_log_record();
-        record.set_severity_number(Severity::Info);
-        record.set_severity_text("INFO");
-        record.add_attribute("event.type", "process_exec");
-        record.add_attribute("process.pid", i64::from(event.pid));
-        record.add_attribute("process.ppid", i64::from(event.ppid));
-        record.add_attribute("process.uid", i64::from(event.uid));
-        record.add_attribute("process.gid", i64::from(event.gid));
-        record.add_attribute("process.cgroup_id", event.cgroup_id.cast_signed());
 
         let comm_len = (event.comm_len as usize).min(16);
         let comm = String::from_utf8_lossy(&event.comm[..comm_len])
             .trim_end_matches('\0')
             .to_owned();
+        let metadata = SecurityEventMetadata::new(
+            SecurityEventKind::ProcessExec,
+            PolicyMatchContext::new(
+                PolicyRuleFamily::Process,
+                settings.process_policy_match(&comm),
+            ),
+        );
+        add_security_metadata(&mut record, metadata);
+        record.add_attribute("process.pid", i64::from(event.pid));
+        record.add_attribute("process.ppid", i64::from(event.ppid));
+        record.add_attribute("process.uid", i64::from(event.uid));
+        record.add_attribute("process.gid", i64::from(event.gid));
+        record.add_attribute("process.cgroup_id", event.cgroup_id.cast_signed());
         record.add_attribute("process.comm", comm);
 
         if settings.capture_command_line {
@@ -69,41 +78,43 @@ impl OtlpLogsExporter {
     }
 
     /// Exports a `FileAccessEvent` as an OTLP log record.
-    pub fn export_file_event(&self, event: &FileAccessEvent) {
+    pub fn export_file_event(&self, event: &FileAccessEvent, settings: &SecuritySettings) {
         let logger = self.provider.logger("prism-security");
         let mut record = logger.create_log_record();
-        record.set_severity_number(Severity::Info);
-        record.set_severity_text("INFO");
-        record.add_attribute("event.type", "file_access");
-        record.add_attribute("process.pid", i64::from(event.pid));
-        record.add_attribute("process.uid", i64::from(event.uid));
-        record.add_attribute("process.cgroup_id", event.cgroup_id.cast_signed());
 
         let path_len = (event.path_len as usize).min(128);
         let path = String::from_utf8_lossy(&event.path[..path_len])
             .trim_end_matches('\0')
             .to_owned();
+        let metadata = SecurityEventMetadata::new(
+            SecurityEventKind::FileAccess,
+            PolicyMatchContext::new(
+                PolicyRuleFamily::FilePath,
+                settings.file_policy_match(&path),
+            ),
+        );
+        add_security_metadata(&mut record, metadata);
+        record.add_attribute("process.pid", i64::from(event.pid));
+        record.add_attribute("process.uid", i64::from(event.uid));
+        record.add_attribute("process.cgroup_id", event.cgroup_id.cast_signed());
         record.add_attribute("file.path", path);
 
         logger.emit(record);
     }
 
     /// Exports a `NetworkConnectionEvent` as an OTLP log record.
-    pub fn export_network_event(&self, event: &NetworkConnectionEvent) {
+    pub fn export_network_event(
+        &self,
+        event: &NetworkConnectionEvent,
+        settings: &SecuritySettings,
+    ) {
         let logger = self.provider.logger("prism-security");
         let mut record = logger.create_log_record();
-        record.set_severity_number(Severity::Info);
-        record.set_severity_text("INFO");
-        record.add_attribute("event.type", "network_connection");
-        record.add_attribute("process.pid", i64::from(event.pid));
-        record.add_attribute("process.uid", i64::from(event.uid));
-        record.add_attribute("process.cgroup_id", event.cgroup_id.cast_signed());
 
         let comm_len = (event.comm_len as usize).min(16);
         let comm = String::from_utf8_lossy(&event.comm[..comm_len])
             .trim_end_matches('\0')
             .to_owned();
-        record.add_attribute("process.comm", comm);
 
         let dst = format!(
             "{}.{}.{}.{}:{}",
@@ -113,6 +124,18 @@ impl OtlpLogsExporter {
             event.dst_addr[3],
             event.dst_port,
         );
+        let metadata = SecurityEventMetadata::new(
+            SecurityEventKind::NetworkConnection,
+            PolicyMatchContext::new(
+                PolicyRuleFamily::NetworkDestination,
+                settings.network_policy_match(&dst),
+            ),
+        );
+        add_security_metadata(&mut record, metadata);
+        record.add_attribute("process.pid", i64::from(event.pid));
+        record.add_attribute("process.uid", i64::from(event.uid));
+        record.add_attribute("process.cgroup_id", event.cgroup_id.cast_signed());
+        record.add_attribute("process.comm", comm);
         record.add_attribute("network.dst", dst);
 
         logger.emit(record);
@@ -124,6 +147,35 @@ impl OtlpLogsExporter {
             error!(error = %e, "OTLP logs provider shutdown error");
         }
     }
+}
+
+fn add_security_metadata(record: &mut impl LogRecord, metadata: SecurityEventMetadata) {
+    record.set_severity_number(otlp_severity(metadata.severity()));
+    record.set_severity_text(metadata.severity().as_str());
+    record.add_attribute("event.id", metadata.kind().stable_id());
+    record.add_attribute("event.type", metadata.kind().event_type());
+    record.add_attribute("event.category", metadata.kind().category().as_str());
+    record.add_attribute("event.severity", metadata.severity().as_str());
+    record.add_attribute("policy.action", metadata.policy().action().as_str());
+
+    if let Some(rule_family) = metadata.policy().rule_family() {
+        record.add_attribute("policy.rule_family", rule_family.as_str());
+    }
+    if let Some(rule_index) = metadata.policy().rule_index() {
+        record.add_attribute("policy.rule_index", usize_to_i64(rule_index));
+    }
+}
+
+const fn otlp_severity(severity: SecuritySeverity) -> Severity {
+    match severity {
+        SecuritySeverity::Info => Severity::Info,
+        SecuritySeverity::Warning => Severity::Warn,
+        SecuritySeverity::Error => Severity::Error,
+    }
+}
+
+fn usize_to_i64(value: usize) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
 }
 
 /// Runs the OTLP export loop reading from the security processor output.

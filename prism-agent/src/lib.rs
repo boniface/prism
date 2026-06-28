@@ -5,4 +5,5 @@ pub mod metadata;
 pub mod metrics;
 pub mod processors;
 pub mod runtime;
+pub mod security;
 pub mod telemetry;
