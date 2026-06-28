@@ -32,6 +32,8 @@ const ENV_OTLP_ENDPOINT: &str = "PRISM_OTLP_ENDPOINT";
 const ENV_LOG_LEVEL: &str = "PRISM_LOG_LEVEL";
 const ENV_CAPTURE_PROCESS_EXEC: &str = "PRISM_CAPTURE_PROCESS_EXEC";
 const ENV_CAPTURE_COMMAND_LINE: &str = "PRISM_CAPTURE_COMMAND_LINE";
+const ENV_POSTGRES_TELEMETRY_ENABLED: &str = "PRISM_POSTGRES_TELEMETRY_ENABLED";
+const ENV_REDIS_TELEMETRY_ENABLED: &str = "PRISM_REDIS_TELEMETRY_ENABLED";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentConfig {
@@ -42,6 +44,7 @@ pub struct AgentConfig {
     pub prometheus: PrometheusSettings,
     pub otlp: OtlpSettings,
     pub security: SecuritySettings,
+    pub application_telemetry: ApplicationTelemetrySettings,
     pub logging: LoggingSettings,
 }
 
@@ -159,6 +162,7 @@ impl Default for AgentConfig {
             prometheus: PrometheusSettings::default(),
             otlp: OtlpSettings::default(),
             security: SecuritySettings::default(),
+            application_telemetry: ApplicationTelemetrySettings::default(),
             logging: LoggingSettings::default(),
         }
     }
@@ -355,6 +359,12 @@ impl SecuritySettings {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ApplicationTelemetrySettings {
+    pub postgres_enabled: bool,
+    pub redis_enabled: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoggingSettings {
     pub level: String,
@@ -414,6 +424,7 @@ struct RawConfig {
     prometheus: RawPrometheusSettings,
     otlp: RawOtlpSettings,
     security: RawSecuritySettings,
+    application_telemetry: RawApplicationTelemetrySettings,
     logging: RawLoggingSettings,
 }
 
@@ -507,6 +518,16 @@ impl RawConfig {
                 process_rules: Vec::new(),
                 network_rules: Vec::new(),
             },
+            application_telemetry: ApplicationTelemetrySettings {
+                postgres_enabled: self
+                    .application_telemetry
+                    .postgres_enabled
+                    .unwrap_or(defaults.application_telemetry.postgres_enabled),
+                redis_enabled: self
+                    .application_telemetry
+                    .redis_enabled
+                    .unwrap_or(defaults.application_telemetry.redis_enabled),
+            },
             logging: LoggingSettings {
                 level: self.logging.level.unwrap_or(defaults.logging.level),
             },
@@ -563,6 +584,13 @@ struct RawOtlpSettings {
 struct RawSecuritySettings {
     capture_process_exec: Option<bool>,
     capture_command_line: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct RawApplicationTelemetrySettings {
+    postgres_enabled: Option<bool>,
+    redis_enabled: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -642,6 +670,14 @@ impl EnvOverrides {
         self.apply_bool(
             ENV_CAPTURE_COMMAND_LINE,
             &mut config.security.capture_command_line,
+        )?;
+        self.apply_bool(
+            ENV_POSTGRES_TELEMETRY_ENABLED,
+            &mut config.application_telemetry.postgres_enabled,
+        )?;
+        self.apply_bool(
+            ENV_REDIS_TELEMETRY_ENABLED,
+            &mut config.application_telemetry.redis_enabled,
         )?;
         Ok(())
     }
@@ -850,6 +886,8 @@ mod tests {
         assert_eq!(config.prometheus.max_label_value_len, 128);
         assert!(!config.prometheus.expensive_dimensions_enabled);
         assert_eq!(config.prometheus.series_limit, 10_000);
+        assert!(!config.application_telemetry.postgres_enabled);
+        assert!(!config.application_telemetry.redis_enabled);
     }
 
     #[test]
@@ -887,6 +925,9 @@ otlp:
 security:
   capture_process_exec: true
   capture_command_line: true
+application_telemetry:
+  postgres_enabled: true
+  redis_enabled: false
 logging:
   level: debug
 ",
@@ -926,6 +967,8 @@ logging:
         assert_eq!(config.otlp.endpoint, "http://collector:4317");
         assert!(config.security.capture_process_exec);
         assert!(config.security.capture_command_line);
+        assert!(config.application_telemetry.postgres_enabled);
+        assert!(!config.application_telemetry.redis_enabled);
         assert_eq!(config.logging.level, "debug");
     }
 
@@ -968,6 +1011,8 @@ prometheus:
                 (ENV_LOG_LEVEL, "trace"),
                 (ENV_CAPTURE_PROCESS_EXEC, "true"),
                 (ENV_CAPTURE_COMMAND_LINE, "true"),
+                (ENV_POSTGRES_TELEMETRY_ENABLED, "true"),
+                (ENV_REDIS_TELEMETRY_ENABLED, "true"),
             ],
         )
         .expect("config should load");
@@ -996,6 +1041,8 @@ prometheus:
         assert_eq!(config.logging.level, "trace");
         assert!(config.security.capture_process_exec);
         assert!(config.security.capture_command_line);
+        assert!(config.application_telemetry.postgres_enabled);
+        assert!(config.application_telemetry.redis_enabled);
     }
 
     #[test]

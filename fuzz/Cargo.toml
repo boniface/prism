@@ -18,3 +18,15 @@ name = "http_parser"
 path = "fuzz_targets/http_parser.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "postgres_parser"
+path = "fuzz_targets/postgres_parser.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "redis_parser"
+path = "fuzz_targets/redis_parser.rs"
+test = false
+doc = false

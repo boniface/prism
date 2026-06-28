@@ -29,5 +29,9 @@ security:
   capture_process_exec: true
   capture_command_line: false
 
+application_telemetry:
+  postgres_enabled: false
+  redis_enabled: false
+
 logging:
   level: info
