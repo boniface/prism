@@ -185,6 +185,7 @@ impl AgentConfig {
                 reason: "high-cardinality labels require expensive_dimensions_enabled",
             });
         }
+        validate_security_policy(&self.security)?;
 
         Ok(())
     }
@@ -323,7 +324,8 @@ impl Default for OtlpSettings {
 }
 
 /// Action to take when a security policy rule matches.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum PolicyAction {
     /// Emit the event with no additional annotation.
     #[default]
@@ -335,7 +337,8 @@ pub enum PolicyAction {
 }
 
 /// A rule that matches a file path prefix.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FilePathRule {
     /// Path prefix to match (e.g. `/etc/`).
     pub prefix: String,
@@ -344,7 +347,8 @@ pub struct FilePathRule {
 }
 
 /// A rule that matches a process executable name.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProcessRule {
     /// Executable comm name to match (e.g. `bash`).
     pub comm: String,
@@ -353,7 +357,8 @@ pub struct ProcessRule {
 }
 
 /// A rule that matches a network destination.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NetworkRule {
     /// Destination CIDR or IP prefix to match (e.g. `10.0.0.`).
     pub destination: String,
@@ -681,6 +686,9 @@ impl RawOtlpSettings {
 struct RawSecuritySettings {
     capture_process_exec: Option<bool>,
     capture_command_line: Option<bool>,
+    file_path_rules: Option<Vec<FilePathRule>>,
+    process_rules: Option<Vec<ProcessRule>>,
+    network_rules: Option<Vec<NetworkRule>>,
 }
 
 impl RawSecuritySettings {
@@ -692,9 +700,9 @@ impl RawSecuritySettings {
             capture_command_line: self
                 .capture_command_line
                 .unwrap_or(defaults.capture_command_line),
-            file_path_rules: defaults.file_path_rules,
-            process_rules: defaults.process_rules,
-            network_rules: defaults.network_rules,
+            file_path_rules: self.file_path_rules.unwrap_or(defaults.file_path_rules),
+            process_rules: self.process_rules.unwrap_or(defaults.process_rules),
+            network_rules: self.network_rules.unwrap_or(defaults.network_rules),
         }
     }
 }
@@ -1008,6 +1016,43 @@ fn ensure_non_empty_path(field: &'static str, value: &Path) -> Result<(), Config
     Ok(())
 }
 
+fn validate_security_policy(settings: &SecuritySettings) -> Result<(), ConfigError> {
+    if settings
+        .file_path_rules
+        .iter()
+        .any(|rule| rule.prefix.trim().is_empty())
+    {
+        return Err(ConfigError::InvalidValue {
+            field: "security.file_path_rules.prefix",
+            reason: "must be non-empty",
+        });
+    }
+
+    if settings
+        .process_rules
+        .iter()
+        .any(|rule| rule.comm.trim().is_empty())
+    {
+        return Err(ConfigError::InvalidValue {
+            field: "security.process_rules.comm",
+            reason: "must be non-empty",
+        });
+    }
+
+    if settings
+        .network_rules
+        .iter()
+        .any(|rule| rule.destination.trim().is_empty())
+    {
+        return Err(ConfigError::InvalidValue {
+            field: "security.network_rules.destination",
+            reason: "must be non-empty",
+        });
+    }
+
+    Ok(())
+}
+
 fn parse_bool(name: &'static str, value: &str) -> Result<bool, ConfigError> {
     match value {
         "1" | "true" | "TRUE" | "yes" | "YES" => Ok(true),
@@ -1084,6 +1129,68 @@ mod tests {
 
     use super::*;
 
+    const FULL_YAML_CONFIG: &str = r"
+agent:
+  node_name: node-a
+  instance_id: prism-a
+bpf:
+  object_path: /opt/prism/prism-ebpf
+  pin_path: /run/prism/bpf
+  ephemeral: false
+metadata:
+  providers:
+    - docker
+    - systemd
+network:
+  tc_hooks_enabled: true
+  tc_interfaces:
+    - eth0
+prometheus:
+  listen_addr: 0.0.0.0:9999
+  label_allowlist:
+    - cgroup-id
+    - namespace
+  max_label_value_len: 64
+  expensive_dimensions_enabled: false
+  series_limit: 500
+otlp:
+  endpoint: http://collector:4317
+  trace_batch_size: 16
+  trace_retry_attempts: 2
+  trace_shutdown_timeout_ms: 2500
+security:
+  capture_process_exec: true
+  capture_command_line: true
+  file_path_rules:
+    - prefix: /etc/
+      action: alert
+    - prefix: /tmp/
+      action: deny
+  process_rules:
+    - comm: bash
+      action: alert
+    - comm: nc
+      action: deny
+  network_rules:
+    - destination: 10.0.0.
+      action: alert
+    - destination: 192.0.2.
+      action: deny
+application_telemetry:
+  postgres_enabled: true
+  redis_enabled: false
+trace:
+  create_root_spans: true
+  span_queue_capacity: 128
+tls_telemetry:
+  enabled: true
+  library_allowlist:
+    - open-ssl
+    - rustls
+logging:
+  level: debug
+";
+
     #[test]
     fn missing_default_config_uses_defaults() {
         let config = AgentConfig::load_with_test_env(
@@ -1130,56 +1237,7 @@ mod tests {
     fn yaml_config_is_loaded() {
         let temp_dir = TempDir::new().expect("tempdir should be created");
         let path = temp_dir.path().join("config.yaml");
-        fs::write(
-            &path,
-            r"
-agent:
-  node_name: node-a
-  instance_id: prism-a
-bpf:
-  object_path: /opt/prism/prism-ebpf
-  pin_path: /run/prism/bpf
-  ephemeral: false
-metadata:
-  providers:
-    - docker
-    - systemd
-network:
-  tc_hooks_enabled: true
-  tc_interfaces:
-    - eth0
-prometheus:
-  listen_addr: 0.0.0.0:9999
-  label_allowlist:
-    - cgroup-id
-    - namespace
-  max_label_value_len: 64
-  expensive_dimensions_enabled: false
-  series_limit: 500
-otlp:
-  endpoint: http://collector:4317
-  trace_batch_size: 16
-  trace_retry_attempts: 2
-  trace_shutdown_timeout_ms: 2500
-security:
-  capture_process_exec: true
-  capture_command_line: true
-application_telemetry:
-  postgres_enabled: true
-  redis_enabled: false
-trace:
-  create_root_spans: true
-  span_queue_capacity: 128
-tls_telemetry:
-  enabled: true
-  library_allowlist:
-    - open-ssl
-    - rustls
-logging:
-  level: debug
-",
-        )
-        .expect("config should be written");
+        fs::write(&path, FULL_YAML_CONFIG).expect("config should be written");
 
         let config = AgentConfig::load_with_test_env(&path, ConfigPathMode::Required, &[])
             .expect("config should load");
@@ -1215,8 +1273,7 @@ logging:
         assert_eq!(config.otlp.trace_batch_size, 16);
         assert_eq!(config.otlp.trace_retry_attempts, 2);
         assert_eq!(config.otlp.trace_shutdown_timeout_ms, 2_500);
-        assert!(config.security.capture_process_exec);
-        assert!(config.security.capture_command_line);
+        assert_loaded_security_yaml(&config.security);
         assert!(config.application_telemetry.postgres_enabled);
         assert!(!config.application_telemetry.redis_enabled);
         assert!(config.trace.create_root_spans);
@@ -1227,6 +1284,20 @@ logging:
             vec![TlsLibrary::OpenSsl, TlsLibrary::Rustls]
         );
         assert_eq!(config.logging.level, "debug");
+    }
+
+    fn assert_loaded_security_yaml(security: &SecuritySettings) {
+        assert!(security.capture_process_exec);
+        assert!(security.capture_command_line);
+        assert_eq!(security.file_policy("/etc/passwd"), PolicyAction::Alert);
+        assert_eq!(security.file_policy("/tmp/payload"), PolicyAction::Deny);
+        assert_eq!(security.process_policy("bash"), PolicyAction::Alert);
+        assert_eq!(security.process_policy("nc"), PolicyAction::Deny);
+        assert_eq!(security.network_policy("10.0.0.8:443"), PolicyAction::Alert);
+        assert_eq!(
+            security.network_policy("192.0.2.10:443"),
+            PolicyAction::Deny
+        );
     }
 
     #[test]
@@ -1459,6 +1530,78 @@ tls_telemetry:
                 field: "tls_telemetry.library_allowlist"
             }
         ));
+    }
+
+    #[test]
+    fn invalid_security_policy_rule_fails_validation() {
+        let temp_dir = TempDir::new().expect("tempdir should be created");
+        let path = temp_dir.path().join("config.yaml");
+        fs::write(
+            &path,
+            r"
+security:
+  file_path_rules:
+    - prefix: ''
+      action: alert
+",
+        )
+        .expect("config should be written");
+
+        let error = AgentConfig::load_with_test_env(&path, ConfigPathMode::Required, &[])
+            .expect_err("empty file path policy prefix should fail");
+
+        assert!(matches!(
+            error,
+            ConfigError::InvalidValue {
+                field: "security.file_path_rules.prefix",
+                reason: "must be non-empty"
+            }
+        ));
+    }
+
+    #[test]
+    fn security_policy_rule_precedence_is_first_match() {
+        let settings = SecuritySettings {
+            capture_process_exec: true,
+            capture_command_line: false,
+            file_path_rules: vec![
+                FilePathRule {
+                    prefix: "/var/".to_owned(),
+                    action: PolicyAction::Alert,
+                },
+                FilePathRule {
+                    prefix: "/var/log/".to_owned(),
+                    action: PolicyAction::Deny,
+                },
+            ],
+            process_rules: vec![
+                ProcessRule {
+                    comm: "bash".to_owned(),
+                    action: PolicyAction::Alert,
+                },
+                ProcessRule {
+                    comm: "bash".to_owned(),
+                    action: PolicyAction::Deny,
+                },
+            ],
+            network_rules: vec![
+                NetworkRule {
+                    destination: "10.".to_owned(),
+                    action: PolicyAction::Alert,
+                },
+                NetworkRule {
+                    destination: "10.0.0.".to_owned(),
+                    action: PolicyAction::Deny,
+                },
+            ],
+        };
+
+        assert_eq!(
+            settings.file_policy("/var/log/auth.log"),
+            PolicyAction::Alert
+        );
+        assert_eq!(settings.process_policy("bash"), PolicyAction::Alert);
+        assert_eq!(settings.network_policy("10.0.0.8:443"), PolicyAction::Alert);
     }
 
     #[test]

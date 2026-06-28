@@ -31,6 +31,15 @@ otlp:
 security:
   capture_process_exec: true
   capture_command_line: false
+  file_path_rules:
+    - prefix: /etc/
+      action: alert
+  process_rules:
+    - comm: bash
+      action: alert
+  network_rules:
+    - destination: 10.0.0.
+      action: alert
 
 application_telemetry:
   postgres_enabled: false
