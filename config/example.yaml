@@ -33,5 +33,9 @@ application_telemetry:
   postgres_enabled: false
   redis_enabled: false
 
+trace:
+  create_root_spans: false
+  span_queue_capacity: 1024
+
 logging:
   level: info
