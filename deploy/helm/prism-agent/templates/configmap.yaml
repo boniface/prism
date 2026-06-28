@@ -27,6 +27,17 @@ data:
     security:
       capture_process_exec: true
       capture_command_line: false
+      process_exec_fields: []
+      file_access_fields: []
+      network_connection_fields: []
+      max_field_len: 128
+      max_event_bytes: 512
+      redaction_patterns:
+        - authorization
+        - cookie
+        - password
+        - secret
+        - token
       file_path_rules: []
       process_rules: []
       network_rules: []

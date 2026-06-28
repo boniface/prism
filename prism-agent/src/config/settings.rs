@@ -377,6 +377,18 @@ pub struct NetworkRule {
     pub action: PolicyAction,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SecurityEventField {
+    CommandLine,
+    ExecutablePath,
+    FilePath,
+    NetworkDestination,
+    KubernetesLabel,
+    KubernetesAnnotation,
+    SqlText,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PolicyRuleMatch {
     action: PolicyAction,
@@ -411,16 +423,46 @@ impl PolicyRuleMatch {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecuritySettings {
     pub capture_process_exec: bool,
     pub capture_command_line: bool,
+    pub process_exec_fields: Vec<SecurityEventField>,
+    pub file_access_fields: Vec<SecurityEventField>,
+    pub network_connection_fields: Vec<SecurityEventField>,
+    pub max_field_len: usize,
+    pub max_event_bytes: usize,
+    pub redaction_patterns: Vec<String>,
     /// Ordered list of file path rules. First match wins.
     pub file_path_rules: Vec<FilePathRule>,
     /// Ordered list of process execution rules. First match wins.
     pub process_rules: Vec<ProcessRule>,
     /// Ordered list of network destination rules. First match wins.
     pub network_rules: Vec<NetworkRule>,
+}
+
+impl Default for SecuritySettings {
+    fn default() -> Self {
+        Self {
+            capture_process_exec: false,
+            capture_command_line: false,
+            process_exec_fields: Vec::new(),
+            file_access_fields: Vec::new(),
+            network_connection_fields: Vec::new(),
+            max_field_len: 128,
+            max_event_bytes: 512,
+            redaction_patterns: vec![
+                "authorization".to_owned(),
+                "cookie".to_owned(),
+                "password".to_owned(),
+                "secret".to_owned(),
+                "token".to_owned(),
+            ],
+            file_path_rules: Vec::new(),
+            process_rules: Vec::new(),
+            network_rules: Vec::new(),
+        }
+    }
 }
 
 impl SecuritySettings {
@@ -755,6 +797,12 @@ impl RawOtlpSettings {
 struct RawSecuritySettings {
     capture_process_exec: Option<bool>,
     capture_command_line: Option<bool>,
+    process_exec_fields: Option<Vec<SecurityEventField>>,
+    file_access_fields: Option<Vec<SecurityEventField>>,
+    network_connection_fields: Option<Vec<SecurityEventField>>,
+    max_field_len: Option<usize>,
+    max_event_bytes: Option<usize>,
+    redaction_patterns: Option<Vec<String>>,
     file_path_rules: Option<Vec<FilePathRule>>,
     process_rules: Option<Vec<ProcessRule>>,
     network_rules: Option<Vec<NetworkRule>>,
@@ -769,6 +817,20 @@ impl RawSecuritySettings {
             capture_command_line: self
                 .capture_command_line
                 .unwrap_or(defaults.capture_command_line),
+            process_exec_fields: self
+                .process_exec_fields
+                .unwrap_or(defaults.process_exec_fields),
+            file_access_fields: self
+                .file_access_fields
+                .unwrap_or(defaults.file_access_fields),
+            network_connection_fields: self
+                .network_connection_fields
+                .unwrap_or(defaults.network_connection_fields),
+            max_field_len: self.max_field_len.unwrap_or(defaults.max_field_len),
+            max_event_bytes: self.max_event_bytes.unwrap_or(defaults.max_event_bytes),
+            redaction_patterns: self
+                .redaction_patterns
+                .unwrap_or(defaults.redaction_patterns),
             file_path_rules: self.file_path_rules.unwrap_or(defaults.file_path_rules),
             process_rules: self.process_rules.unwrap_or(defaults.process_rules),
             network_rules: self.network_rules.unwrap_or(defaults.network_rules),
@@ -1086,6 +1148,60 @@ fn ensure_non_empty_path(field: &'static str, value: &Path) -> Result<(), Config
 }
 
 fn validate_security_policy(settings: &SecuritySettings) -> Result<(), ConfigError> {
+    if settings.max_field_len == 0 {
+        return Err(ConfigError::InvalidValue {
+            field: "security.max_field_len",
+            reason: "must be greater than zero",
+        });
+    }
+    if settings.max_event_bytes == 0 {
+        return Err(ConfigError::InvalidValue {
+            field: "security.max_event_bytes",
+            reason: "must be greater than zero",
+        });
+    }
+    if settings
+        .redaction_patterns
+        .iter()
+        .any(|pattern| pattern.trim().is_empty())
+    {
+        return Err(ConfigError::InvalidValue {
+            field: "security.redaction_patterns",
+            reason: "patterns must be non-empty",
+        });
+    }
+    if settings.process_exec_fields.iter().any(|field| {
+        !matches!(
+            field,
+            SecurityEventField::CommandLine | SecurityEventField::ExecutablePath
+        )
+    }) {
+        return Err(ConfigError::InvalidValue {
+            field: "security.process_exec_fields",
+            reason: "field is not valid for process_exec events",
+        });
+    }
+    if settings
+        .file_access_fields
+        .iter()
+        .any(|field| !matches!(field, SecurityEventField::FilePath))
+    {
+        return Err(ConfigError::InvalidValue {
+            field: "security.file_access_fields",
+            reason: "field is not valid for file_access events",
+        });
+    }
+    if settings
+        .network_connection_fields
+        .iter()
+        .any(|field| !matches!(field, SecurityEventField::NetworkDestination))
+    {
+        return Err(ConfigError::InvalidValue {
+            field: "security.network_connection_fields",
+            reason: "field is not valid for network_connection events",
+        });
+    }
+
     if settings
         .file_path_rules
         .iter()
@@ -1230,6 +1346,17 @@ otlp:
 security:
   capture_process_exec: true
   capture_command_line: true
+  process_exec_fields:
+    - executable-path
+  file_access_fields:
+    - file-path
+  network_connection_fields:
+    - network-destination
+  max_field_len: 96
+  max_event_bytes: 384
+  redaction_patterns:
+    - api_key
+    - token
   file_path_rules:
     - prefix: /etc/
       action: alert
@@ -1291,6 +1418,17 @@ logging:
         assert_eq!(config.otlp.trace_batch_size, 64);
         assert_eq!(config.otlp.trace_retry_attempts, 3);
         assert_eq!(config.otlp.trace_shutdown_timeout_ms, 5_000);
+        assert!(config.security.process_exec_fields.is_empty());
+        assert!(config.security.file_access_fields.is_empty());
+        assert!(config.security.network_connection_fields.is_empty());
+        assert_eq!(config.security.max_field_len, 128);
+        assert_eq!(config.security.max_event_bytes, 512);
+        assert!(
+            config
+                .security
+                .redaction_patterns
+                .contains(&"secret".to_owned())
+        );
         assert!(!config.application_telemetry.postgres_enabled);
         assert!(!config.application_telemetry.redis_enabled);
         assert!(!config.trace.create_root_spans);
@@ -1358,6 +1496,24 @@ logging:
     fn assert_loaded_security_yaml(security: &SecuritySettings) {
         assert!(security.capture_process_exec);
         assert!(security.capture_command_line);
+        assert_eq!(
+            security.process_exec_fields,
+            vec![SecurityEventField::ExecutablePath]
+        );
+        assert_eq!(
+            security.file_access_fields,
+            vec![SecurityEventField::FilePath]
+        );
+        assert_eq!(
+            security.network_connection_fields,
+            vec![SecurityEventField::NetworkDestination]
+        );
+        assert_eq!(security.max_field_len, 96);
+        assert_eq!(security.max_event_bytes, 384);
+        assert_eq!(
+            security.redaction_patterns,
+            vec!["api_key".to_owned(), "token".to_owned()]
+        );
         assert_eq!(security.file_policy("/etc/passwd"), PolicyAction::Alert);
         assert_eq!(security.file_policy("/tmp/payload"), PolicyAction::Deny);
         assert_eq!(security.process_policy("bash"), PolicyAction::Alert);
@@ -1629,6 +1785,57 @@ security:
     }
 
     #[test]
+    fn invalid_security_field_policy_fails_validation() {
+        let temp_dir = TempDir::new().expect("tempdir should be created");
+        let path = temp_dir.path().join("config.yaml");
+        fs::write(
+            &path,
+            r"
+security:
+  process_exec_fields:
+    - file-path
+",
+        )
+        .expect("config should be written");
+
+        let error = AgentConfig::load_with_test_env(&path, ConfigPathMode::Required, &[])
+            .expect_err("file path should not be valid for process exec events");
+
+        assert!(matches!(
+            error,
+            ConfigError::InvalidValue {
+                field: "security.process_exec_fields",
+                reason: "field is not valid for process_exec events"
+            }
+        ));
+    }
+
+    #[test]
+    fn security_field_caps_must_be_non_zero() {
+        let temp_dir = TempDir::new().expect("tempdir should be created");
+        let path = temp_dir.path().join("config.yaml");
+        fs::write(
+            &path,
+            r"
+security:
+  max_event_bytes: 0
+",
+        )
+        .expect("config should be written");
+
+        let error = AgentConfig::load_with_test_env(&path, ConfigPathMode::Required, &[])
+            .expect_err("zero event cap should fail");
+
+        assert!(matches!(
+            error,
+            ConfigError::InvalidValue {
+                field: "security.max_event_bytes",
+                reason: "must be greater than zero"
+            }
+        ));
+    }
+
+    #[test]
     fn security_policy_rule_precedence_is_first_match() {
         let settings = SecuritySettings {
             capture_process_exec: true,
@@ -1663,6 +1870,7 @@ security:
                     action: PolicyAction::Deny,
                 },
             ],
+            ..SecuritySettings::default()
         };
 
         assert_eq!(

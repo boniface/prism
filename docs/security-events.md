@@ -13,3 +13,15 @@ Policy match context must contain only policy metadata such as action, rule
 family, and rule index. It must not include the matched command line, file
 path, destination, SQL text, labels, annotations, headers, bodies, secrets, or
 other payload values.
+
+High-cardinality security fields are opt-in per event type:
+
+| Event type | Allowlist setting | High-cardinality fields |
+| --- | --- | --- |
+| `process_exec` | `security.process_exec_fields` | `command-line`, `executable-path` |
+| `file_access` | `security.file_access_fields` | `file-path` |
+| `network_connection` | `security.network_connection_fields` | `network-destination` |
+
+All allowlisted values are redacted before export when they match
+`security.redaction_patterns`, then capped by `security.max_field_len`.
+Oversized raw events are dropped when they exceed `security.max_event_bytes`.
