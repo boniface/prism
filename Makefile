@@ -23,7 +23,7 @@ else
 USER_BUILD_ARGS := --target $(USER_TARGET)
 endif
 
-.PHONY: audit build ci dev dist docker-smoke ebpf fmt lint package package-build package-deb package-helm package-rpm package-tar perf setup test
+.PHONY: audit build ci dev dist docker-smoke ebpf fmt helm-smoke lint package package-build package-deb package-helm package-rpm package-tar perf setup test
 
 setup:
 	./scripts/setup-dev.sh
@@ -63,6 +63,9 @@ ci: fmt lint test ebpf audit
 docker-smoke:
 	./scripts/docker-compose-smoke.sh
 
+helm-smoke:
+	./scripts/helm-kind-smoke.sh
+
 package: package-tar
 
 package-build: ebpf
@@ -79,6 +82,8 @@ package-rpm: package-build
 
 package-helm:
 	helm lint deploy/helm/prism-agent
+	helm template prism-agent deploy/helm/prism-agent --namespace prism-system >/dev/null
+	helm template prism-agent deploy/helm/prism-agent --namespace prism-system -f deploy/helm/prism-agent/values-production.yaml >/dev/null
 	helm package deploy/helm/prism-agent --version "$(VERSION)" --app-version "$(VERSION)" --destination target/dist
 
 dist: package-tar package-deb package-rpm package-helm
