@@ -43,10 +43,13 @@ copyright = "2026, Prism Contributors"
 depends = "$auto"
 section = "admin"
 priority = "optional"
+conf-files = ["/etc/prism/config.yaml"]
+maintainer-scripts = "../deploy/packaging/deb"
 assets = [
     ["target/release/prism-agent", "usr/bin/", "755"],
     ["../target/bpfel-unknown-none/release/prism-ebpf", "usr/lib/prism/prism-ebpf", "644"],
     ["../config/example.yaml", "etc/prism/config.yaml", "644"],
+    ["../config/example.yaml", "usr/share/doc/prism-agent/config.example.yaml", "644"],
     ["../deploy/systemd/prism-agent.service", "lib/systemd/system/prism-agent.service", "644"],
     ["../LICENSE", "usr/share/doc/prism-agent/LICENSE", "644"],
     ["../README.md", "usr/share/doc/prism-agent/README.md", "644"],
@@ -71,6 +74,12 @@ source = "config/example.yaml"
 dest = "/etc/prism/config.yaml"
 mode = "0644"
 config = "noreplace"
+
+[[package.metadata.generate-rpm.assets]]
+source = "config/example.yaml"
+dest = "/usr/share/doc/prism-agent/config.example.yaml"
+mode = "0644"
+doc = true
 
 [[package.metadata.generate-rpm.assets]]
 source = "deploy/systemd/prism-agent.service"
