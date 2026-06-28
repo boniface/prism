@@ -36,6 +36,8 @@ const ENV_POSTGRES_TELEMETRY_ENABLED: &str = "PRISM_POSTGRES_TELEMETRY_ENABLED";
 const ENV_REDIS_TELEMETRY_ENABLED: &str = "PRISM_REDIS_TELEMETRY_ENABLED";
 const ENV_TRACE_CREATE_ROOT_SPANS: &str = "PRISM_TRACE_CREATE_ROOT_SPANS";
 const ENV_TRACE_SPAN_QUEUE_CAPACITY: &str = "PRISM_TRACE_SPAN_QUEUE_CAPACITY";
+const ENV_TLS_TELEMETRY_ENABLED: &str = "PRISM_TLS_TELEMETRY_ENABLED";
+const ENV_TLS_LIBRARY_ALLOWLIST: &str = "PRISM_TLS_LIBRARY_ALLOWLIST";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentConfig {
@@ -48,6 +50,7 @@ pub struct AgentConfig {
     pub security: SecuritySettings,
     pub application_telemetry: ApplicationTelemetrySettings,
     pub trace: TraceSettings,
+    pub tls_telemetry: TlsTelemetrySettings,
     pub logging: LoggingSettings,
 }
 
@@ -144,6 +147,11 @@ impl AgentConfig {
                 reason: "must be greater than zero",
             });
         }
+        if self.tls_telemetry.enabled && self.tls_telemetry.library_allowlist.is_empty() {
+            return Err(ConfigError::MissingRequired {
+                field: "tls_telemetry.library_allowlist",
+            });
+        }
         if !self.prometheus.expensive_dimensions_enabled
             && self
                 .prometheus
@@ -173,6 +181,7 @@ impl Default for AgentConfig {
             security: SecuritySettings::default(),
             application_telemetry: ApplicationTelemetrySettings::default(),
             trace: TraceSettings::default(),
+            tls_telemetry: TlsTelemetrySettings::default(),
             logging: LoggingSettings::default(),
         }
     }
@@ -390,6 +399,29 @@ impl Default for TraceSettings {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TlsLibrary {
+    OpenSsl,
+    BoringSsl,
+    Rustls,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TlsTelemetrySettings {
+    pub enabled: bool,
+    pub library_allowlist: Vec<TlsLibrary>,
+}
+
+impl Default for TlsTelemetrySettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            library_allowlist: vec![TlsLibrary::OpenSsl],
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoggingSettings {
     pub level: String,
@@ -451,6 +483,7 @@ struct RawConfig {
     security: RawSecuritySettings,
     application_telemetry: RawApplicationTelemetrySettings,
     trace: RawTraceSettings,
+    tls_telemetry: RawTlsTelemetrySettings,
     logging: RawLoggingSettings,
 }
 
@@ -476,97 +509,21 @@ impl RawConfig {
 
     fn into_config(self) -> Result<AgentConfig, ConfigError> {
         let defaults = AgentConfig::default();
-        let bpf = BpfLoaderConfig::new(
-            self.bpf.object_path.unwrap_or(defaults.bpf.object_path),
-            self.bpf.pin_path.unwrap_or(defaults.bpf.pin_path),
-        )
-        .with_ephemeral(self.bpf.ephemeral.unwrap_or(defaults.bpf.ephemeral));
 
         Ok(AgentConfig {
-            agent: AgentSettings {
-                node_name: self.agent.node_name.unwrap_or(defaults.agent.node_name),
-                instance_id: self.agent.instance_id.unwrap_or(defaults.agent.instance_id),
-            },
-            bpf,
-            metadata: MetadataSettings {
-                providers: self
-                    .metadata
-                    .providers
-                    .unwrap_or(defaults.metadata.providers),
-            },
-            network: NetworkSettings {
-                tc_hooks_enabled: self
-                    .network
-                    .tc_hooks_enabled
-                    .unwrap_or(defaults.network.tc_hooks_enabled),
-                tc_interfaces: self
-                    .network
-                    .tc_interfaces
-                    .unwrap_or(defaults.network.tc_interfaces),
-            },
-            prometheus: PrometheusSettings {
-                listen_addr: parse_socket_addr(
-                    "prometheus.listen_addr",
-                    self.prometheus.listen_addr.as_deref(),
-                    defaults.prometheus.listen_addr,
-                )?,
-                label_allowlist: self
-                    .prometheus
-                    .label_allowlist
-                    .unwrap_or(defaults.prometheus.label_allowlist),
-                max_label_value_len: self
-                    .prometheus
-                    .max_label_value_len
-                    .unwrap_or(defaults.prometheus.max_label_value_len),
-                expensive_dimensions_enabled: self
-                    .prometheus
-                    .expensive_dimensions_enabled
-                    .unwrap_or(defaults.prometheus.expensive_dimensions_enabled),
-                series_limit: self
-                    .prometheus
-                    .series_limit
-                    .unwrap_or(defaults.prometheus.series_limit),
-            },
-            otlp: OtlpSettings {
-                endpoint: self.otlp.endpoint.unwrap_or(defaults.otlp.endpoint),
-            },
-
-            security: SecuritySettings {
-                capture_process_exec: self
-                    .security
-                    .capture_process_exec
-                    .unwrap_or(defaults.security.capture_process_exec),
-                capture_command_line: self
-                    .security
-                    .capture_command_line
-                    .unwrap_or(defaults.security.capture_command_line),
-                file_path_rules: Vec::new(),
-                process_rules: Vec::new(),
-                network_rules: Vec::new(),
-            },
-            application_telemetry: ApplicationTelemetrySettings {
-                postgres_enabled: self
-                    .application_telemetry
-                    .postgres_enabled
-                    .unwrap_or(defaults.application_telemetry.postgres_enabled),
-                redis_enabled: self
-                    .application_telemetry
-                    .redis_enabled
-                    .unwrap_or(defaults.application_telemetry.redis_enabled),
-            },
-            trace: TraceSettings {
-                create_root_spans: self
-                    .trace
-                    .create_root_spans
-                    .unwrap_or(defaults.trace.create_root_spans),
-                span_queue_capacity: self
-                    .trace
-                    .span_queue_capacity
-                    .unwrap_or(defaults.trace.span_queue_capacity),
-            },
-            logging: LoggingSettings {
-                level: self.logging.level.unwrap_or(defaults.logging.level),
-            },
+            agent: self.agent.into_settings(defaults.agent),
+            bpf: self.bpf.into_settings(defaults.bpf),
+            metadata: self.metadata.into_settings(defaults.metadata),
+            network: self.network.into_settings(defaults.network),
+            prometheus: self.prometheus.into_settings(defaults.prometheus)?,
+            otlp: self.otlp.into_settings(defaults.otlp),
+            security: self.security.into_settings(defaults.security),
+            application_telemetry: self
+                .application_telemetry
+                .into_settings(defaults.application_telemetry),
+            trace: self.trace.into_settings(defaults.trace),
+            tls_telemetry: self.tls_telemetry.into_settings(defaults.tls_telemetry),
+            logging: self.logging.into_settings(defaults.logging),
         })
     }
 }
@@ -578,6 +535,15 @@ struct RawAgentSettings {
     instance_id: Option<String>,
 }
 
+impl RawAgentSettings {
+    fn into_settings(self, defaults: AgentSettings) -> AgentSettings {
+        AgentSettings {
+            node_name: self.node_name.unwrap_or(defaults.node_name),
+            instance_id: self.instance_id.unwrap_or(defaults.instance_id),
+        }
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct RawBpfSettings {
@@ -586,10 +552,28 @@ struct RawBpfSettings {
     ephemeral: Option<bool>,
 }
 
+impl RawBpfSettings {
+    fn into_settings(self, defaults: BpfLoaderConfig) -> BpfLoaderConfig {
+        BpfLoaderConfig::new(
+            self.object_path.unwrap_or(defaults.object_path),
+            self.pin_path.unwrap_or(defaults.pin_path),
+        )
+        .with_ephemeral(self.ephemeral.unwrap_or(defaults.ephemeral))
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct RawMetadataSettings {
     providers: Option<Vec<MetadataProvider>>,
+}
+
+impl RawMetadataSettings {
+    fn into_settings(self, defaults: MetadataSettings) -> MetadataSettings {
+        MetadataSettings {
+            providers: self.providers.unwrap_or(defaults.providers),
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -597,6 +581,15 @@ struct RawMetadataSettings {
 struct RawNetworkSettings {
     tc_hooks_enabled: Option<bool>,
     tc_interfaces: Option<Vec<String>>,
+}
+
+impl RawNetworkSettings {
+    fn into_settings(self, defaults: NetworkSettings) -> NetworkSettings {
+        NetworkSettings {
+            tc_hooks_enabled: self.tc_hooks_enabled.unwrap_or(defaults.tc_hooks_enabled),
+            tc_interfaces: self.tc_interfaces.unwrap_or(defaults.tc_interfaces),
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -609,10 +602,41 @@ struct RawPrometheusSettings {
     series_limit: Option<usize>,
 }
 
+impl RawPrometheusSettings {
+    fn into_settings(
+        self,
+        defaults: PrometheusSettings,
+    ) -> Result<PrometheusSettings, ConfigError> {
+        Ok(PrometheusSettings {
+            listen_addr: parse_socket_addr(
+                "prometheus.listen_addr",
+                self.listen_addr.as_deref(),
+                defaults.listen_addr,
+            )?,
+            label_allowlist: self.label_allowlist.unwrap_or(defaults.label_allowlist),
+            max_label_value_len: self
+                .max_label_value_len
+                .unwrap_or(defaults.max_label_value_len),
+            expensive_dimensions_enabled: self
+                .expensive_dimensions_enabled
+                .unwrap_or(defaults.expensive_dimensions_enabled),
+            series_limit: self.series_limit.unwrap_or(defaults.series_limit),
+        })
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct RawOtlpSettings {
     endpoint: Option<String>,
+}
+
+impl RawOtlpSettings {
+    fn into_settings(self, defaults: OtlpSettings) -> OtlpSettings {
+        OtlpSettings {
+            endpoint: self.endpoint.unwrap_or(defaults.endpoint),
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -622,11 +646,36 @@ struct RawSecuritySettings {
     capture_command_line: Option<bool>,
 }
 
+impl RawSecuritySettings {
+    fn into_settings(self, defaults: SecuritySettings) -> SecuritySettings {
+        SecuritySettings {
+            capture_process_exec: self
+                .capture_process_exec
+                .unwrap_or(defaults.capture_process_exec),
+            capture_command_line: self
+                .capture_command_line
+                .unwrap_or(defaults.capture_command_line),
+            file_path_rules: defaults.file_path_rules,
+            process_rules: defaults.process_rules,
+            network_rules: defaults.network_rules,
+        }
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct RawApplicationTelemetrySettings {
     postgres_enabled: Option<bool>,
     redis_enabled: Option<bool>,
+}
+
+impl RawApplicationTelemetrySettings {
+    fn into_settings(self, defaults: ApplicationTelemetrySettings) -> ApplicationTelemetrySettings {
+        ApplicationTelemetrySettings {
+            postgres_enabled: self.postgres_enabled.unwrap_or(defaults.postgres_enabled),
+            redis_enabled: self.redis_enabled.unwrap_or(defaults.redis_enabled),
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -636,10 +685,45 @@ struct RawTraceSettings {
     span_queue_capacity: Option<usize>,
 }
 
+impl RawTraceSettings {
+    fn into_settings(self, defaults: TraceSettings) -> TraceSettings {
+        TraceSettings {
+            create_root_spans: self.create_root_spans.unwrap_or(defaults.create_root_spans),
+            span_queue_capacity: self
+                .span_queue_capacity
+                .unwrap_or(defaults.span_queue_capacity),
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct RawTlsTelemetrySettings {
+    enabled: Option<bool>,
+    library_allowlist: Option<Vec<TlsLibrary>>,
+}
+
+impl RawTlsTelemetrySettings {
+    fn into_settings(self, defaults: TlsTelemetrySettings) -> TlsTelemetrySettings {
+        TlsTelemetrySettings {
+            enabled: self.enabled.unwrap_or(defaults.enabled),
+            library_allowlist: self.library_allowlist.unwrap_or(defaults.library_allowlist),
+        }
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct RawLoggingSettings {
     level: Option<String>,
+}
+
+impl RawLoggingSettings {
+    fn into_settings(self, defaults: LoggingSettings) -> LoggingSettings {
+        LoggingSettings {
+            level: self.level.unwrap_or(defaults.level),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -730,6 +814,11 @@ impl EnvOverrides {
             ENV_TRACE_SPAN_QUEUE_CAPACITY,
             &mut config.trace.span_queue_capacity,
         )?;
+        self.apply_bool(ENV_TLS_TELEMETRY_ENABLED, &mut config.tls_telemetry.enabled)?;
+        self.apply_tls_libraries(
+            ENV_TLS_LIBRARY_ALLOWLIST,
+            &mut config.tls_telemetry.library_allowlist,
+        )?;
         Ok(())
     }
 
@@ -785,6 +874,23 @@ impl EnvOverrides {
                 .collect::<Result<Vec<_>, _>>()?;
             target.clear();
             target.extend(labels);
+        }
+
+        Ok(())
+    }
+
+    fn apply_tls_libraries(
+        &self,
+        name: &'static str,
+        target: &mut Vec<TlsLibrary>,
+    ) -> Result<(), ConfigError> {
+        if let Some(value) = self.value(name)? {
+            let libraries = parse_csv_list(name, value)?
+                .into_iter()
+                .map(|library| parse_tls_library(name, &library))
+                .collect::<Result<Vec<_>, _>>()?;
+            target.clear();
+            target.extend(libraries);
         }
 
         Ok(())
@@ -901,6 +1007,18 @@ fn parse_prometheus_label(name: &'static str, value: &str) -> Result<PrometheusL
     }
 }
 
+fn parse_tls_library(name: &'static str, value: &str) -> Result<TlsLibrary, ConfigError> {
+    match value {
+        "openssl" | "open-ssl" | "open_ssl" => Ok(TlsLibrary::OpenSsl),
+        "boringssl" | "boring-ssl" | "boring_ssl" => Ok(TlsLibrary::BoringSsl),
+        "rustls" => Ok(TlsLibrary::Rustls),
+        _ => Err(ConfigError::InvalidEnv {
+            name,
+            reason: "unknown TLS library",
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -941,6 +1059,11 @@ mod tests {
         assert!(!config.application_telemetry.redis_enabled);
         assert!(!config.trace.create_root_spans);
         assert_eq!(config.trace.span_queue_capacity, 1024);
+        assert!(!config.tls_telemetry.enabled);
+        assert_eq!(
+            config.tls_telemetry.library_allowlist,
+            vec![TlsLibrary::OpenSsl]
+        );
     }
 
     #[test]
@@ -984,6 +1107,11 @@ application_telemetry:
 trace:
   create_root_spans: true
   span_queue_capacity: 128
+tls_telemetry:
+  enabled: true
+  library_allowlist:
+    - open-ssl
+    - rustls
 logging:
   level: debug
 ",
@@ -1027,6 +1155,11 @@ logging:
         assert!(!config.application_telemetry.redis_enabled);
         assert!(config.trace.create_root_spans);
         assert_eq!(config.trace.span_queue_capacity, 128);
+        assert!(config.tls_telemetry.enabled);
+        assert_eq!(
+            config.tls_telemetry.library_allowlist,
+            vec![TlsLibrary::OpenSsl, TlsLibrary::Rustls]
+        );
         assert_eq!(config.logging.level, "debug");
     }
 
@@ -1073,6 +1206,8 @@ prometheus:
                 (ENV_REDIS_TELEMETRY_ENABLED, "true"),
                 (ENV_TRACE_CREATE_ROOT_SPANS, "true"),
                 (ENV_TRACE_SPAN_QUEUE_CAPACITY, "256"),
+                (ENV_TLS_TELEMETRY_ENABLED, "true"),
+                (ENV_TLS_LIBRARY_ALLOWLIST, "openssl,boringssl"),
             ],
         )
         .expect("config should load");
@@ -1105,6 +1240,11 @@ prometheus:
         assert!(config.application_telemetry.redis_enabled);
         assert!(config.trace.create_root_spans);
         assert_eq!(config.trace.span_queue_capacity, 256);
+        assert!(config.tls_telemetry.enabled);
+        assert_eq!(
+            config.tls_telemetry.library_allowlist,
+            vec![TlsLibrary::OpenSsl, TlsLibrary::BoringSsl]
+        );
     }
 
     #[test]
@@ -1220,6 +1360,31 @@ trace:
             ConfigError::InvalidValue {
                 field: "trace.span_queue_capacity",
                 reason: "must be greater than zero"
+            }
+        ));
+    }
+
+    #[test]
+    fn enabled_tls_telemetry_requires_library_allowlist() {
+        let temp_dir = TempDir::new().expect("tempdir should be created");
+        let path = temp_dir.path().join("config.yaml");
+        fs::write(
+            &path,
+            r"
+tls_telemetry:
+  enabled: true
+  library_allowlist: []
+",
+        )
+        .expect("config should be written");
+
+        let error = AgentConfig::load_with_test_env(&path, ConfigPathMode::Required, &[])
+            .expect_err("enabled TLS telemetry should require allowlist");
+
+        assert!(matches!(
+            error,
+            ConfigError::MissingRequired {
+                field: "tls_telemetry.library_allowlist"
             }
         ));
     }

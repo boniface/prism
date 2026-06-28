@@ -37,5 +37,10 @@ trace:
   create_root_spans: false
   span_queue_capacity: 1024
 
+tls_telemetry:
+  enabled: false
+  library_allowlist:
+    - open-ssl
+
 logging:
   level: info
