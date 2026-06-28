@@ -4,15 +4,30 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
+    command:
+      - --config
+      - /etc/prism/config.yaml
     pid: host
     network_mode: host
     cap_add:
       - BPF
       - PERFMON
+      - NET_ADMIN
+    security_opt:
+      - no-new-privileges:true
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
     volumes:
+      - ./docker/config.yaml:/etc/prism/config.yaml:ro
       - /sys/fs/bpf:/sys/fs/bpf:rw
       - /sys/fs/cgroup:/sys/fs/cgroup:ro
+      - /sys/kernel/btf/vmlinux:/sys/kernel/btf/vmlinux:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
+      PRISM_NODE_NAME: docker-host
+      PRISM_AGENT_INSTANCE_ID: prism-docker
       PRISM_EBPF_OBJECT: /usr/lib/prism/prism-ebpf
       PRISM_BPF_PIN_PATH: /sys/fs/bpf/prism
+    restart: unless-stopped
