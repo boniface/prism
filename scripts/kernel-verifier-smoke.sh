@@ -33,7 +33,7 @@ if ! mountpoint -q /sys/fs/bpf; then
 fi
 
 make ebpf 2>&1 | tee "${log_file}"
-PRISM_EBPF_OBJECT="${PRISM_EBPF_OBJECT:-target/bpfel-unknown-none/release/prism-ebpf}"
+PRISM_EBPF_OBJECT="${PRISM_EBPF_OBJECT:-target/bpfel-unknown-none/release/libprism_ebpf.so}"
 PRISM_BPF_PIN_PATH="${PRISM_BPF_PIN_PATH:-/sys/fs/bpf/prism-verifier-${kernel}}"
 export PRISM_EBPF_OBJECT PRISM_BPF_PIN_PATH
 
