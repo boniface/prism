@@ -42,15 +42,25 @@ run_agent() {
         PRISM_BPF_PIN_PATH="${PRISM_BPF_PIN_PATH}" \
         PRISM_BPF_EPHEMERAL=true \
         PRISM_CAPTURE_PROCESS_EXEC=false \
+	RUST_LOG=info \
         timeout --signal=INT "${PRISM_VERIFIER_TIMEOUT_SECONDS:-15}" \
         ./target/release/prism-agent
 }
 
 if [ "$(id -u)" -eq 0 ]; then
     make build 2>&1 | tee -a "${log_file}"
-    run_agent 2>&1 | tee -a "${log_file}"
+    run_agent 2>&1 | tee -a "${log_file}" || true
 else
     make build 2>&1 | tee -a "${log_file}"
-    sudo --preserve-env=PRISM_EBPF_OBJECT,PRISM_BPF_PIN_PATH,PRISM_BPF_EPHEMERAL,PRISM_CAPTURE_PROCESS_EXEC \
-        bash -c "$(declare -f run_agent); run_agent" 2>&1 | tee -a "${log_file}"
+   	 sudo --preserve-env=PRISM_EBPF_OBJECT,PRISM_BPF_PIN_PATH,PRISM_BPF_EPHEMERAL,PRISM_CAPTURE_PROCESS_EXEC,RUST_LOG \
+		 bash -c "$(declare -f run_agent); run_agent" 2>&1 | tee -a "${log_file}" || true
+          
+fi
+
+if grep -q "prism-agent started" "${log_file}"; then
+    echo "verifier smoke passed: agent loaded and started successfully" | tee -a "${log_file}"
+    exit 0
+else
+    echo "verifier smoke failed: agent did not start successfully" | tee -a "${log_file}"
+    exit 1
 fi
