@@ -6,7 +6,7 @@ BPF_TARGET ?= bpfel-unknown-none
 HOST_TARGET ?= $(shell rustc +$(STABLE) -vV | sed -n 's/^host: //p')
 USER_TARGET ?= $(HOST_TARGET)
 DIST_TARGET ?= x86_64-unknown-linux-musl
-VERSION ?= 0.1.0-alpha.0
+VERSION ?= 0.1.0-alpha.0i
 DEB_VERSION ?= $(shell ./scripts/package-versions.sh "$(VERSION)" | sed -n 's/^deb_version=//p')
 RPM_VERSION ?= $(shell ./scripts/package-versions.sh "$(VERSION)" | sed -n 's/^rpm_version=//p')
 RPM_RELEASE ?= $(shell ./scripts/package-versions.sh "$(VERSION)" | sed -n 's/^rpm_release=//p')
@@ -23,7 +23,7 @@ else
 USER_BUILD_ARGS := --target $(USER_TARGET)
 endif
 
-.PHONY: audit build chaos-smoke ci crash-recovery-smoke dev dist docker-smoke ebpf fmt helm-smoke lint package package-build package-deb package-helm package-rpm package-smoke package-tar perf platform-smoke release-smoke setup test verifier-smoke
+.PHONY: audit build chaos-smoke ci crash-recovery-smoke dev dist docker-smoke ebpf fmt helm-smoke lint package package-build package-deb package-helm package-rpm package-smoke package-tar perf platform-smoke release-smoke setup test verifier-smoke load-test
 
 setup:
 	./scripts/setup-dev.sh
@@ -43,7 +43,8 @@ test:
 
 perf:
 	$(CARGO) +$(STABLE) bench -p prism-agent
-
+load-test:
+	./scripts/load-test-profiles.sh
 ebpf:
 	$(EBPF_ENV) $(CARGO) +$(NIGHTLY) build -Z build-std=core -p prism-ebpf --release --target $(BPF_TARGET)
 
