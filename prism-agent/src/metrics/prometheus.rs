@@ -5,9 +5,9 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
-    time::Instant,
 };
 
+use crate::metrics::self_metrics::{SelfMetrics, render_self_metrics};
 use thiserror::Error;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -75,8 +75,8 @@ pub struct PrometheusExporter {
     source: Arc<dyn MetricSnapshotSource>,
     controls: CardinalityControls,
     series: SeriesTracker,
-    started_at: Instant,
     scrape_count: AtomicU64,
+    self_metrics: SelfMetrics,
 }
 
 impl PrometheusExporter {
@@ -86,8 +86,8 @@ impl PrometheusExporter {
             source,
             controls: CardinalityControls::from(settings),
             series: SeriesTracker::new(settings.series_limit),
-            started_at: Instant::now(),
             scrape_count: AtomicU64::new(0),
+            self_metrics: SelfMetrics::new(),
         }
     }
 
@@ -99,74 +99,86 @@ impl PrometheusExporter {
     /// infrastructure metric snapshots.
     pub fn render(&self) -> Result<String, PrometheusError> {
         let snapshots = self.source.metric_snapshots()?;
-        let scrape_count = self.scrape_count.fetch_add(1, Ordering::Relaxed) + 1;
+        let _ = self.scrape_count.fetch_add(1, Ordering::Relaxed) + 1;
+        self.self_metrics.record_scrape();
         let mut output = String::with_capacity(4096 + snapshots.len().saturating_mul(1024));
-        render_self_metrics(
-            &mut output,
-            scrape_count,
-            self.started_at.elapsed().as_secs(),
-        );
+
+        // Self-metrics
+        output.push_str(&render_self_metrics(
+            &self.self_metrics,
+            env!("CARGO_PKG_VERSION"),
+            1, // health_status - will be wired up later
+        ));
+
+        // Cgroup infrastructure metrics
         for snapshot in &snapshots {
-            self.render_snapshot(&mut output, snapshot);
+            let labels = self.controls.labels_for(snapshot);
+            let counters = snapshot.counters();
+
+            self.render_metric(
+                &mut output,
+                "prism_cgroup_cpu_runtime_ns",
+                &labels,
+                counters.cpu_runtime_ns,
+            );
+            self.render_metric(
+                &mut output,
+                "prism_cgroup_memory_current_bytes",
+                &labels,
+                counters.memory_current_bytes,
+            );
+            self.render_metric(
+                &mut output,
+                "prism_cgroup_memory_limit_bytes",
+                &labels,
+                counters.memory_limit_bytes,
+            );
+            self.render_metric(
+                &mut output,
+                "prism_cgroup_disk_read_bytes",
+                &labels,
+                counters.disk_read_bytes,
+            );
+            self.render_metric(
+                &mut output,
+                "prism_cgroup_disk_write_bytes",
+                &labels,
+                counters.disk_write_bytes,
+            );
+            self.render_metric(
+                &mut output,
+                "prism_cgroup_rx_bytes",
+                &labels,
+                counters.rx_bytes,
+            );
+            self.render_metric(
+                &mut output,
+                "prism_cgroup_tx_bytes",
+                &labels,
+                counters.tx_bytes,
+            );
+            self.render_metric(
+                &mut output,
+                "prism_cgroup_rx_packets",
+                &labels,
+                counters.rx_packets,
+            );
+            self.render_metric(
+                &mut output,
+                "prism_cgroup_tx_packets",
+                &labels,
+                counters.tx_packets,
+            );
+            self.render_metric(
+                &mut output,
+                "prism_cgroup_drops_total",
+                &labels,
+                counters.drop_count,
+            );
         }
+
         render_cardinality_metrics(&mut output, &self.series);
         Ok(output)
-    }
-
-    fn render_snapshot(&self, output: &mut String, snapshot: &MetricSnapshot) {
-        let labels = self.controls.labels_for(snapshot);
-        let counters = snapshot.counters();
-
-        self.render_metric(
-            output,
-            "prism_cgroup_cpu_runtime_ns",
-            &labels,
-            counters.cpu_runtime_ns,
-        );
-        self.render_metric(
-            output,
-            "prism_cgroup_memory_current_bytes",
-            &labels,
-            counters.memory_current_bytes,
-        );
-        self.render_metric(
-            output,
-            "prism_cgroup_memory_limit_bytes",
-            &labels,
-            counters.memory_limit_bytes,
-        );
-        self.render_metric(
-            output,
-            "prism_cgroup_disk_read_bytes",
-            &labels,
-            counters.disk_read_bytes,
-        );
-        self.render_metric(
-            output,
-            "prism_cgroup_disk_write_bytes",
-            &labels,
-            counters.disk_write_bytes,
-        );
-        self.render_metric(output, "prism_cgroup_rx_bytes", &labels, counters.rx_bytes);
-        self.render_metric(output, "prism_cgroup_tx_bytes", &labels, counters.tx_bytes);
-        self.render_metric(
-            output,
-            "prism_cgroup_rx_packets",
-            &labels,
-            counters.rx_packets,
-        );
-        self.render_metric(
-            output,
-            "prism_cgroup_tx_packets",
-            &labels,
-            counters.tx_packets,
-        );
-        self.render_metric(
-            output,
-            "prism_cgroup_drops_total",
-            &labels,
-            counters.drop_count,
-        );
     }
 
     fn render_metric(&self, output: &mut String, name: &str, labels: &str, value: u64) {
@@ -244,18 +256,6 @@ pub enum PrometheusError {
     SnapshotLock,
     #[error("failed to read eBPF metric snapshots")]
     Bpf(#[source] BpfLifecycleError),
-}
-
-fn render_self_metrics(output: &mut String, scrape_count: u64, uptime_seconds: u64) {
-    output.push_str("# HELP prism_agent_up Whether the Prism agent exporter is running.\n");
-    output.push_str("# TYPE prism_agent_up gauge\n");
-    output.push_str("prism_agent_up 1\n");
-    output.push_str("# HELP prism_agent_uptime_seconds Prism agent exporter uptime in seconds.\n");
-    output.push_str("# TYPE prism_agent_uptime_seconds counter\n");
-    let _ = writeln!(output, "prism_agent_uptime_seconds {uptime_seconds}");
-    output.push_str("# HELP prism_agent_scrapes_total Prometheus scrapes served by this agent.\n");
-    output.push_str("# TYPE prism_agent_scrapes_total counter\n");
-    let _ = writeln!(output, "prism_agent_scrapes_total {scrape_count}");
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
