@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::bpf::BpfLoaderConfig;
@@ -237,7 +237,7 @@ impl Default for MetadataSettings {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum MetadataProvider {
     Docker,
@@ -273,7 +273,7 @@ impl Default for PrometheusSettings {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PrometheusLabel {
     CgroupId,
@@ -324,7 +324,7 @@ impl Default for OtlpSettings {
 }
 
 /// Action to take when a security policy rule matches.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PolicyAction {
     /// Emit the event with no additional annotation.
@@ -348,7 +348,7 @@ impl PolicyAction {
 }
 
 /// A rule that matches a file path prefix.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FilePathRule {
     /// Path prefix to match (e.g. `/etc/`).
@@ -358,7 +358,7 @@ pub struct FilePathRule {
 }
 
 /// A rule that matches a process executable name.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProcessRule {
     /// Executable comm name to match (e.g. `bash`).
@@ -368,7 +368,7 @@ pub struct ProcessRule {
 }
 
 /// A rule that matches a network destination.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct NetworkRule {
     /// Destination CIDR or IP prefix to match (e.g. `10.0.0.`).
@@ -377,7 +377,7 @@ pub struct NetworkRule {
     pub action: PolicyAction,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SecurityEventField {
     CommandLine,
@@ -542,7 +542,7 @@ impl Default for TraceSettings {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TlsLibrary {
     OpenSsl,
@@ -614,7 +614,7 @@ enum ConfigPathMode {
     Required,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 struct RawConfig {
     agent: RawAgentSettings,
@@ -671,7 +671,7 @@ impl RawConfig {
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 struct RawAgentSettings {
     node_name: Option<String>,
@@ -687,7 +687,7 @@ impl RawAgentSettings {
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 struct RawBpfSettings {
     object_path: Option<PathBuf>,
@@ -705,7 +705,7 @@ impl RawBpfSettings {
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 struct RawMetadataSettings {
     providers: Option<Vec<MetadataProvider>>,
@@ -719,7 +719,7 @@ impl RawMetadataSettings {
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 struct RawNetworkSettings {
     tc_hooks_enabled: Option<bool>,
@@ -735,7 +735,7 @@ impl RawNetworkSettings {
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 struct RawPrometheusSettings {
     listen_addr: Option<String>,
@@ -768,7 +768,7 @@ impl RawPrometheusSettings {
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 struct RawOtlpSettings {
     endpoint: Option<String>,
@@ -792,7 +792,7 @@ impl RawOtlpSettings {
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 struct RawSecuritySettings {
     capture_process_exec: Option<bool>,
@@ -838,7 +838,7 @@ impl RawSecuritySettings {
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 struct RawApplicationTelemetrySettings {
     postgres_enabled: Option<bool>,
@@ -854,7 +854,7 @@ impl RawApplicationTelemetrySettings {
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 struct RawTraceSettings {
     create_root_spans: Option<bool>,
@@ -872,7 +872,7 @@ impl RawTraceSettings {
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 struct RawTlsTelemetrySettings {
     enabled: Option<bool>,
@@ -888,7 +888,7 @@ impl RawTlsTelemetrySettings {
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 struct RawLoggingSettings {
     level: Option<String>,

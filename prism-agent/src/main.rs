@@ -5,7 +5,10 @@ use prism_agent::{
     bpf::{LoadedBpf, reconcile_stale_pins},
     config::AgentConfig,
     metrics::{BpfMetricSource, MetricSnapshotSource, PrometheusServer},
-    runtime::{ManagedTaskRuntime, TaskRuntimeConfig},
+    runtime::{
+        ManagedTaskRuntime, TaskRuntimeConfig,
+        health::{TaskState, run_health_server},
+    },
 };
 use std::sync::Arc;
 #[cfg(target_os = "linux")]
@@ -40,24 +43,56 @@ async fn main() -> Result<()> {
     let shutdown = CancellationToken::new();
     let prometheus_task = tokio::spawn(prometheus.run(shutdown.clone()));
 
-    #[cfg(target_os = "linux")]
+    // Health registry and server
+    let health_registry = prism_agent::runtime::health::HealthRegistry::new();
+    let health_shutdown = CancellationToken::new();
+    let health_shutdown_clone = health_shutdown.clone();
+    let health_listen_addr = "127.0.0.1:19091".to_owned();
+    let health_registry_clone = health_registry.clone();
+    let health_task = tokio::spawn(async move {
+        if let Err(e) = run_health_server(
+            health_registry_clone,
+            &health_listen_addr,
+            health_shutdown_clone,
+        )
+        .await
+        {
+            error!(error = %e, "health server failed");
+        }
+    });
+
     let mut runtime = ManagedTaskRuntime::new(TaskRuntimeConfig::default());
-    #[cfg(not(target_os = "linux"))]
-    let runtime = ManagedTaskRuntime::new(TaskRuntimeConfig::default());
     let token = runtime.cancellation_token();
 
     #[cfg(target_os = "linux")]
     {
+        health_registry
+            .set_state("security-processor", TaskState::Starting)
+            .await;
         let ebpf_arc = Arc::new(Mutex::new(
             LoadedBpf::load(&config.bpf).context("failed to load eBPF for security processor")?,
         ));
         let ebpf_for_processor = Arc::clone(&ebpf_arc);
-
         let security_settings = config.security;
+        let registry = health_registry.clone();
         runtime
             .spawn("security-processor", move |task_token| async move {
+                registry
+                    .set_state("security-processor", TaskState::Running)
+                    .await;
                 let mut guard = ebpf_for_processor.lock().await;
-                run_security_processor(guard.ebpf_mut(), task_token, security_settings).await
+                let result =
+                    run_security_processor(guard.ebpf_mut(), task_token, security_settings).await;
+                if let Err(e) = &result {
+                    registry
+                        .set_failed("security-processor", e.to_string())
+                        .await;
+                } else {
+                    registry
+                        .set_state("security-processor", TaskState::Stopped)
+                        .await;
+                }
+                result
             })
             .await;
     }
@@ -69,6 +104,9 @@ async fn main() -> Result<()> {
     if let Err(e) = runtime.shutdown().await {
         error!(error = %e, "runtime shutdown error");
     }
+
+    health_shutdown.cancel();
+    health_task.await.ok();
 
     shutdown.cancel();
     prometheus_task

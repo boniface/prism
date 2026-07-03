@@ -12,7 +12,11 @@ publish = false
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+axum.workspace = true
 bytemuck.workspace = true
+opentelemetry.workspace = true
+opentelemetry-otlp.workspace = true
+opentelemetry_sdk.workspace = true
 prism-core = { path = "../prism-core", version = "0.1.0" }
 serde.workspace = true
 serde_json.workspace = true
@@ -22,9 +26,6 @@ tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-opentelemetry.workspace = true
-opentelemetry_sdk.workspace = true
-opentelemetry-otlp.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 aya.workspace = true
