@@ -12,6 +12,9 @@ pub struct SelfMetrics {
     otlp_export_failures: AtomicU64,
     otlp_export_retries: AtomicU64,
     otlp_exporter_up: AtomicU64,
+    shutdown_started: AtomicU64,
+    shutdown_completed: AtomicU64,
+    shutdown_timeout: AtomicU64,
 }
 
 impl Default for SelfMetrics {
@@ -31,7 +34,37 @@ impl SelfMetrics {
             otlp_export_failures: AtomicU64::new(0),
             otlp_export_retries: AtomicU64::new(0),
             otlp_exporter_up: AtomicU64::new(1),
+            shutdown_started: AtomicU64::new(0),
+            shutdown_completed: AtomicU64::new(0),
+            shutdown_timeout: AtomicU64::new(0),
         }
+    }
+
+    pub fn record_shutdown_started(&self) {
+        self.shutdown_started.store(1, Ordering::Relaxed);
+    }
+
+    pub fn record_shutdown_completed(&self) {
+        self.shutdown_completed.store(1, Ordering::Relaxed);
+    }
+
+    pub fn record_shutdown_timeout(&self) {
+        self.shutdown_timeout.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[must_use]
+    pub fn shutdown_started(&self) -> u64 {
+        self.shutdown_started.load(Ordering::Relaxed)
+    }
+
+    #[must_use]
+    pub fn shutdown_completed(&self) -> u64 {
+        self.shutdown_completed.load(Ordering::Relaxed)
+    }
+
+    #[must_use]
+    pub fn shutdown_timeout(&self) -> u64 {
+        self.shutdown_timeout.load(Ordering::Relaxed)
     }
 
     /// Increments the scrape counter.
@@ -176,6 +209,31 @@ pub fn render_self_metrics(metrics: &SelfMetrics, version: &str, health_status: 
     );
     output.push_str("# TYPE prism_otlp_exporter_up gauge\n");
     let _ = writeln!(output, "prism_otlp_exporter_up {}", metrics.otlp_up());
+
+    // Shutdown metrics
+    output.push_str("# HELP prism_agent_shutdown_started Whether graceful shutdown has started (1) or not (0).\n");
+    output.push_str("# TYPE prism_agent_shutdown_started gauge\n");
+    let _ = writeln!(
+        output,
+        "prism_agent_shutdown_started {}",
+        metrics.shutdown_started()
+    );
+
+    output.push_str("# HELP prism_agent_shutdown_completed Whether graceful shutdown completed (1) or not (0).\n");
+    output.push_str("# TYPE prism_agent_shutdown_completed gauge\n");
+    let _ = writeln!(
+        output,
+        "prism_agent_shutdown_completed {}",
+        metrics.shutdown_completed()
+    );
+
+    output.push_str("# HELP prism_agent_shutdown_timeout_total Total shutdown timeouts.\n");
+    output.push_str("# TYPE prism_agent_shutdown_timeout_total counter\n");
+    let _ = writeln!(
+        output,
+        "prism_agent_shutdown_timeout_total {}",
+        metrics.shutdown_timeout()
+    );
 
     output
 }
