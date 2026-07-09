@@ -1,6 +1,7 @@
 pub mod bpf;
 pub mod config;
 pub mod exporters;
+pub mod logging;
 pub mod metadata;
 pub mod metrics;
 pub mod processors;

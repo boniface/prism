@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use prism_agent::logging::structured::{LoggingConfig, init_structured_logging};
 #[cfg(target_os = "linux")]
 use prism_agent::processors::run_security_processor;
 use prism_agent::{
@@ -20,7 +21,7 @@ use tracing::{error, info, warn};
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
 async fn main() -> Result<()> {
-    init_tracing()?;
+    init_logging()?;
 
     let config = AgentConfig::load().context("failed to load agent config")?;
 
@@ -170,11 +171,10 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn init_tracing() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .try_init()
-        .map_err(|e| anyhow::anyhow!("failed to initialize tracing subscriber: {e}"))
+fn init_logging() -> Result<()> {
+    let config = LoggingConfig::from_env();
+    init_structured_logging(&config)
+        .map_err(|e| anyhow::anyhow!("failed to initialize structured logging: {e}"))
 }
 
 async fn wait_for_shutdown() {
