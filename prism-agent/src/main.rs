@@ -11,12 +11,14 @@ use prism_agent::{
     },
 };
 use std::sync::Arc;
+use std::time::Duration;
 #[cfg(target_os = "linux")]
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() -> Result<()> {
     init_tracing()?;
 
@@ -100,19 +102,69 @@ async fn main() -> Result<()> {
     info!("prism-agent started");
     wait_for_shutdown().await;
 
+    // Begin graceful shutdown with timeout
+    info!("shutdown signal received, beginning graceful shutdown");
+    let shutdown_start = std::time::Instant::now();
+    let graceful_timeout = Duration::from_secs(30);
+
+    // First phase: cancel runtime tasks
     token.cancel();
-    if let Err(e) = runtime.shutdown().await {
-        error!(error = %e, "runtime shutdown error");
+    info!("runtime tasks cancelled, waiting for shutdown...");
+
+    // Use timeout for runtime shutdown
+    let runtime_result = tokio::time::timeout(graceful_timeout, runtime.shutdown()).await;
+
+    match runtime_result {
+        Ok(result) => {
+            if let Err(e) = result {
+                error!(error = %e, "runtime shutdown error");
+            } else {
+                info!("runtime shutdown completed successfully");
+            }
+        }
+        Err(_) => {
+            error!(
+                timeout_secs = graceful_timeout.as_secs(),
+                "runtime shutdown timed out"
+            );
+        }
     }
 
+    // Second phase: health server shutdown
     health_shutdown.cancel();
-    health_task.await.ok();
+    info!("health server shutdown requested");
 
+    let health_result = tokio::time::timeout(Duration::from_secs(5), health_task).await;
+
+    match health_result {
+        Ok(Ok(())) => info!("health server shutdown completed"),
+        Ok(Err(_)) => error!("health server shutdown error"),
+        Err(_) => warn!("health server shutdown timed out"),
+    }
+
+    // Third phase: prometheus exporter shutdown
     shutdown.cancel();
-    prometheus_task
-        .await
-        .context("failed to join prometheus exporter task")?
-        .context("prometheus exporter failed")?;
+    info!("prometheus exporter shutdown requested");
+
+    let prometheus_result = tokio::time::timeout(Duration::from_secs(5), prometheus_task).await;
+
+    match prometheus_result {
+        Ok(Ok(result)) => {
+            if let Err(e) = result {
+                error!(error = %e, "prometheus exporter error");
+            } else {
+                info!("prometheus exporter shutdown completed");
+            }
+        }
+        Ok(Err(_)) => error!("prometheus exporter task join error"),
+        Err(_) => warn!("prometheus exporter shutdown timed out"),
+    }
+
+    let shutdown_duration = shutdown_start.elapsed();
+    info!(
+        duration_secs = shutdown_duration.as_secs_f64(),
+        "graceful shutdown completed"
+    );
 
     info!("prism-agent stopped cleanly");
     Ok(())
@@ -126,11 +178,32 @@ fn init_tracing() -> Result<()> {
 }
 
 async fn wait_for_shutdown() {
+    let sigterm = async {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+            let mut sigterm =
+                signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");
+            sigterm.recv().await;
+        }
+        #[cfg(not(unix))]
+        {
+            tokio::signal::ctrl_c().await.ok();
+        }
+    };
+
     tokio::select! {
         result = tokio::signal::ctrl_c() => {
             if let Err(source) = result {
-                error!(%source, "failed to listen for shutdown signal");
+                error!(%source, "failed to listen for SIGINT");
+            } else {
+                info!("received SIGINT shutdown signal");
             }
         }
+        () = sigterm => {
+            info!("received SIGTERM shutdown signal");
+        }
     }
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
 }
