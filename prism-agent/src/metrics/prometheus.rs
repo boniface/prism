@@ -20,9 +20,7 @@ use crate::{
     config::{PrometheusLabel, PrometheusSettings},
     metadata::CgroupV2Path,
     metrics::{
-        MetricSnapshot,
-        cgroup_lookup::CgroupPathLookup,
-        disk::DiskIoMetricsReader,
+        MetricSnapshot, cgroup_lookup::CgroupPathLookup, disk::DiskIoMetricsReader,
         memory::MemoryMetricsReader,
     },
 };
@@ -60,7 +58,11 @@ impl BpfMetricSource {
     /// Memory/disk reads that fail (e.g. a cgroup that has since exited)
     /// are treated as zero rather than failing the whole scrape, since a
     /// point-in-time scrape racing against cgroup teardown is expected.
-    fn enrich(&self, snapshot: MetricSnapshot, paths: &HashMap<u64, CgroupV2Path>) -> MetricSnapshot {
+    fn enrich(
+        &self,
+        snapshot: MetricSnapshot,
+        paths: &HashMap<u64, CgroupV2Path>,
+    ) -> MetricSnapshot {
         let Some(path) = paths.get(&snapshot.cgroup_id().value()) else {
             return snapshot;
         };

@@ -104,10 +104,7 @@ mod tests {
         let resolved = map
             .get(&expected_ino)
             .expect("nested cgroup should resolve");
-        assert_eq!(
-            resolved.as_path(),
-            Path::new("/system.slice/prism.service")
-        );
+        assert_eq!(resolved.as_path(), Path::new("/system.slice/prism.service"));
     }
 
     #[test]
