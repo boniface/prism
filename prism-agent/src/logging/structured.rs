@@ -70,7 +70,8 @@ pub fn init_structured_logging(config: &LoggingConfig) -> Result<(), anyhow::Err
         .with_thread_ids(true)
         .with_thread_names(true)
         .with_file(true)
-        .with_line_number(true);
+        .with_line_number(true)
+        .with_ansi(false);
 
     if config.json_format {
         // Since we have the json feature enabled in Cargo.toml, use it
