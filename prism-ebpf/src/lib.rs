@@ -1,7 +1,9 @@
 #![no_std]
 #![no_main]
 
-use aya_ebpf::helpers::{bpf_get_current_pid_tgid, bpf_probe_read_user_buf, bpf_probe_read_user_str_bytes};
+use aya_ebpf::helpers::{
+    bpf_get_current_pid_tgid, bpf_probe_read_user_buf, bpf_probe_read_user_str_bytes,
+};
 use aya_ebpf::{
     bindings::TC_ACT_OK,
     helpers::{
@@ -236,10 +238,8 @@ fn try_prism_tcp_connect(ctx: TracePointContext) -> u32 {
     if let Ok(uservaddr_ptr) = unsafe { ctx.read_at::<u64>(UVERVADDR_OFFSET) } {
         if uservaddr_ptr != 0 {
             let mut sockaddr_buf = [0u8; 8];
-            if unsafe {
-                bpf_probe_read_user_buf(uservaddr_ptr as *const u8, &mut sockaddr_buf)
-            }
-            .is_ok()
+            if unsafe { bpf_probe_read_user_buf(uservaddr_ptr as *const u8, &mut sockaddr_buf) }
+                .is_ok()
             {
                 let sin_family = u16::from_ne_bytes([sockaddr_buf[0], sockaddr_buf[1]]);
                 if sin_family == AF_INET {
