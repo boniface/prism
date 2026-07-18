@@ -146,11 +146,14 @@ fn try_prism_execve(_ctx: TracePointContext) -> u32 {
 // ---------------------------------------------------------------------------
 
 #[tracepoint(name = "prism_file_open", category = "syscalls")]
+#[allow(clippy::needless_pass_by_value)]
 pub fn prism_file_open(ctx: TracePointContext) -> u32 {
-    try_prism_file_open(ctx)
+    try_prism_file_open(&ctx)
 }
 
-fn try_prism_file_open(ctx: TracePointContext) -> u32 {
+fn try_prism_file_open(ctx: &TracePointContext) -> u32 {
+    const FILENAME_OFFSET: usize = 24;
+
     let ring = addr_of_mut!(FILE_ACCESS_EVENTS);
     // SAFETY: The ring buffer pointer is created from the mutable static
     // without taking a reference. The eBPF verifier validates all map
@@ -166,13 +169,9 @@ fn try_prism_file_open(ctx: TracePointContext) -> u32 {
     // Offset 24 confirmed against this kernel's sys_enter_openat tracepoint
     // format: `filename` is a `const char *` userspace pointer captured at
     // syscall entry, before the kernel has copied the string in.
-    const FILENAME_OFFSET: usize = 24;
-    let filename_ptr: u64 = match unsafe { ctx.read_at(FILENAME_OFFSET) } {
-        Ok(v) => v,
-        Err(_) => {
-            entry.discard(0);
-            return 1;
-        }
+    let Ok(filename_ptr) = (unsafe { ctx.read_at::<u64>(FILENAME_OFFSET) }) else {
+        entry.discard(0);
+        return 1;
     };
 
     // SAFETY: `entry` is a reserved ring buffer slot sized for FileAccessEvent.
@@ -187,7 +186,7 @@ fn try_prism_file_open(ctx: TracePointContext) -> u32 {
 
         match bpf_probe_read_user_str_bytes(filename_ptr as *const u8, &mut (*event).path) {
             Ok(bytes) => {
-                (*event).path_len = bytes.len() as u16;
+                (*event).path_len = u16::try_from(bytes.len()).unwrap_or(u16::MAX);
             }
             Err(_) => {
                 (*event).path_len = 0;
@@ -203,11 +202,15 @@ fn try_prism_file_open(ctx: TracePointContext) -> u32 {
 // ---------------------------------------------------------------------------
 
 #[tracepoint(name = "prism_tcp_connect", category = "syscalls")]
+#[allow(clippy::needless_pass_by_value)]
 pub fn prism_tcp_connect(ctx: TracePointContext) -> u32 {
-    try_prism_tcp_connect(ctx)
+    try_prism_tcp_connect(&ctx)
 }
 
-fn try_prism_tcp_connect(ctx: TracePointContext) -> u32 {
+fn try_prism_tcp_connect(ctx: &TracePointContext) -> u32 {
+    const UVERVADDR_OFFSET: usize = 24;
+    const AF_INET: u16 = 2;
+
     let ring = addr_of_mut!(NETWORK_SECURITY_EVENTS);
     // SAFETY: The ring buffer pointer is created from the mutable static
     // without taking a reference. The eBPF verifier validates all map
@@ -230,8 +233,6 @@ fn try_prism_tcp_connect(ctx: TracePointContext) -> u32 {
 
     // Offset 24 confirmed against this kernel's sys_enter_connect tracepoint
     // format: `uservaddr` is a `struct sockaddr *` userspace pointer.
-    const UVERVADDR_OFFSET: usize = 24;
-    const AF_INET: u16 = 2;
     let mut dst_addr = [0u8; 4];
     let mut dst_port: u16 = 0;
 
