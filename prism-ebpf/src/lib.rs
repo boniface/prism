@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use aya_ebpf::helpers::bpf_get_current_pid_tgid;
+use aya_ebpf::helpers::{bpf_get_current_pid_tgid, bpf_probe_read_user_buf, bpf_probe_read_user_str_bytes};
 use aya_ebpf::{
     bindings::TC_ACT_OK,
     helpers::{
@@ -148,20 +148,30 @@ pub fn prism_file_open(ctx: TracePointContext) -> u32 {
     try_prism_file_open(ctx)
 }
 
-fn try_prism_file_open(_ctx: TracePointContext) -> u32 {
+fn try_prism_file_open(ctx: TracePointContext) -> u32 {
     let ring = addr_of_mut!(FILE_ACCESS_EVENTS);
-
     // SAFETY: The ring buffer pointer is created from the mutable static
     // without taking a reference. The eBPF verifier validates all map
     // accesses before the program runs.
     let Some(mut entry) = (unsafe { (*ring).reserve::<FileAccessEvent>(0) }) else {
         return 1;
     };
-
     let pid_tgid = bpf_get_current_pid_tgid();
     let uid_gid = bpf_get_current_uid_gid();
     let pid = (pid_tgid & 0xffff_ffff) as u32;
     let uid = (uid_gid & 0xffff_ffff) as u32;
+
+    // Offset 24 confirmed against this kernel's sys_enter_openat tracepoint
+    // format: `filename` is a `const char *` userspace pointer captured at
+    // syscall entry, before the kernel has copied the string in.
+    const FILENAME_OFFSET: usize = 24;
+    let filename_ptr: u64 = match unsafe { ctx.read_at(FILENAME_OFFSET) } {
+        Ok(v) => v,
+        Err(_) => {
+            entry.discard(0);
+            return 1;
+        }
+    };
 
     // SAFETY: `entry` is a reserved ring buffer slot sized for FileAccessEvent.
     unsafe {
@@ -170,11 +180,18 @@ fn try_prism_file_open(_ctx: TracePointContext) -> u32 {
         (*event).cgroup_id = current_cgroup_id();
         (*event).pid = pid;
         (*event).uid = uid;
-        (*event).path_len = 0;
         (*event).reserved = [0u8; 6];
         (*event).path = [0u8; FILE_PATH_LEN];
-    }
 
+        match bpf_probe_read_user_str_bytes(filename_ptr as *const u8, &mut (*event).path) {
+            Ok(bytes) => {
+                (*event).path_len = bytes.len() as u16;
+            }
+            Err(_) => {
+                (*event).path_len = 0;
+            }
+        }
+    }
     entry.submit(0);
     0
 }
@@ -188,21 +205,18 @@ pub fn prism_tcp_connect(ctx: TracePointContext) -> u32 {
     try_prism_tcp_connect(ctx)
 }
 
-fn try_prism_tcp_connect(_ctx: TracePointContext) -> u32 {
+fn try_prism_tcp_connect(ctx: TracePointContext) -> u32 {
     let ring = addr_of_mut!(NETWORK_SECURITY_EVENTS);
-
     // SAFETY: The ring buffer pointer is created from the mutable static
     // without taking a reference. The eBPF verifier validates all map
     // accesses before the program runs.
     let Some(mut entry) = (unsafe { (*ring).reserve::<NetworkConnectionEvent>(0) }) else {
         return 1;
     };
-
     let pid_tgid = bpf_get_current_pid_tgid();
     let uid_gid = bpf_get_current_uid_gid();
     let pid = (pid_tgid & 0xffff_ffff) as u32;
     let uid = (uid_gid & 0xffff_ffff) as u32;
-
     let mut comm = [0u8; COMM_LEN];
     let comm_len = match bpf_get_current_comm() {
         Ok(c) => {
@@ -212,6 +226,30 @@ fn try_prism_tcp_connect(_ctx: TracePointContext) -> u32 {
         Err(_) => 0u16,
     };
 
+    // Offset 24 confirmed against this kernel's sys_enter_connect tracepoint
+    // format: `uservaddr` is a `struct sockaddr *` userspace pointer.
+    const UVERVADDR_OFFSET: usize = 24;
+    const AF_INET: u16 = 2;
+    let mut dst_addr = [0u8; 4];
+    let mut dst_port: u16 = 0;
+
+    if let Ok(uservaddr_ptr) = unsafe { ctx.read_at::<u64>(UVERVADDR_OFFSET) } {
+        if uservaddr_ptr != 0 {
+            let mut sockaddr_buf = [0u8; 8];
+            if unsafe {
+                bpf_probe_read_user_buf(uservaddr_ptr as *const u8, &mut sockaddr_buf)
+            }
+            .is_ok()
+            {
+                let sin_family = u16::from_ne_bytes([sockaddr_buf[0], sockaddr_buf[1]]);
+                if sin_family == AF_INET {
+                    dst_port = u16::from_be_bytes([sockaddr_buf[2], sockaddr_buf[3]]);
+                    dst_addr.copy_from_slice(&sockaddr_buf[4..8]);
+                }
+            }
+        }
+    }
+
     // SAFETY: `entry` is a reserved ring buffer slot sized for
     // `NetworkConnectionEvent`. The verifier checks the slot before use.
     unsafe {
@@ -220,13 +258,12 @@ fn try_prism_tcp_connect(_ctx: TracePointContext) -> u32 {
         (*event).cgroup_id = current_cgroup_id();
         (*event).pid = pid;
         (*event).uid = uid;
-        (*event).dst_addr = [0u8; 4];
-        (*event).dst_port = 0;
+        (*event).dst_addr = dst_addr;
+        (*event).dst_port = dst_port;
         (*event).comm_len = comm_len;
         (*event).comm = comm;
         (*event).reserved = [0u8; 8];
     }
-
     entry.submit(0);
     0
 }
