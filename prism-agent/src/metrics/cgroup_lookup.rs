@@ -45,25 +45,20 @@ impl CgroupPathLookup {
     }
 
     fn walk(&self, dir: &Path, map: &mut HashMap<u64, CgroupV2Path>) -> io::Result<()> {
-        let metadata = match fs::metadata(dir) {
-            Ok(metadata) => metadata,
-            Err(_) => return Ok(()), // race: removed between listing and stat
+        let Ok(metadata) = fs::metadata(dir) else {
+            return Ok(()); // race: removed between listing and stat
         };
         if let Some(relative) = self.relative_path(dir) {
             map.insert(metadata.ino(), relative);
         }
 
-        let entries = match fs::read_dir(dir) {
-            Ok(entries) => entries,
-            Err(_) => return Ok(()),
+        let Ok(entries) = fs::read_dir(dir) else {
+            return Ok(());
         };
 
         for entry in entries.flatten() {
             let path = entry.path();
-            let is_dir = entry
-                .file_type()
-                .map(|file_type| file_type.is_dir())
-                .unwrap_or(false);
+            let is_dir = entry.file_type().is_ok_and(|file_type| file_type.is_dir());
             if is_dir {
                 self.walk(&path, map)?;
             }
