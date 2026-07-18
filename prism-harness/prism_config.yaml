@@ -1,0 +1,73 @@
+agent:
+  node_name: localhost
+  instance_id: prism-local
+
+bpf:
+  pin_path: /sys/fs/bpf/prism
+  ephemeral: true
+
+metadata:
+  providers:
+    - systemd
+
+network:
+  tc_hooks_enabled: true
+  tc_interfaces:
+    - lo
+    - enp0s3
+
+prometheus:
+  listen_addr: 127.0.0.1:9090
+  label_allowlist:
+    - cgroup-id
+  max_label_value_len: 128
+  expensive_dimensions_enabled: false
+  series_limit: 10000
+
+otlp:
+  endpoint: http://127.0.0.1:4317
+  trace_batch_size: 64
+  trace_retry_attempts: 3
+  trace_shutdown_timeout_ms: 5000
+
+security:
+  capture_process_exec: true
+  capture_command_line: false
+  process_exec_fields: []
+  file_access_fields:
+    - file-path
+  network_connection_fields:
+    - network-destination
+  max_field_len: 128
+  max_event_bytes: 512
+  redaction_patterns:
+    - authorization
+    - cookie
+    - password
+    - secret
+    - token
+  file_path_rules:
+    - prefix: /etc/
+      action: alert
+  process_rules:
+    - comm: bash
+      action: alert
+  network_rules:
+    - destination: 10.0.0.
+      action: alert
+
+application_telemetry:
+  postgres_enabled: false
+  redis_enabled: false
+
+trace:
+  create_root_spans: false
+  span_queue_capacity: 1024
+
+tls_telemetry:
+  enabled: false
+  library_allowlist:
+    - open-ssl
+
+logging:
+  level: info
