@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fmt::Write as _,
     sync::{
         Arc, Mutex,
@@ -18,7 +18,11 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     bpf::{BpfLifecycleError, LoadedBpf},
     config::{PrometheusLabel, PrometheusSettings},
-    metrics::MetricSnapshot,
+    metadata::CgroupV2Path,
+    metrics::{
+        MetricSnapshot, cgroup_lookup::CgroupPathLookup, disk::DiskIoMetricsReader,
+        memory::MemoryMetricsReader,
+    },
 };
 
 pub trait MetricSnapshotSource: Send + Sync {
@@ -32,6 +36,9 @@ pub trait MetricSnapshotSource: Send + Sync {
 
 pub struct BpfMetricSource {
     loaded_bpf: Mutex<LoadedBpf>,
+    cgroup_lookup: CgroupPathLookup,
+    memory_reader: MemoryMetricsReader,
+    disk_reader: DiskIoMetricsReader,
 }
 
 impl BpfMetricSource {
@@ -39,20 +46,68 @@ impl BpfMetricSource {
     pub fn new(loaded_bpf: LoadedBpf) -> Self {
         Self {
             loaded_bpf: Mutex::new(loaded_bpf),
+            cgroup_lookup: CgroupPathLookup::system(),
+            memory_reader: MemoryMetricsReader::system(),
+            disk_reader: DiskIoMetricsReader::system(),
         }
+    }
+
+    /// Merges kernel-sourced counters (CPU, network) with cgroup v2
+    /// filesystem-sourced counters (memory, disk I/O) for one cgroup.
+    ///
+    /// Memory/disk reads that fail (e.g. a cgroup that has since exited)
+    /// are treated as zero rather than failing the whole scrape, since a
+    /// point-in-time scrape racing against cgroup teardown is expected.
+    fn enrich(
+        &self,
+        snapshot: MetricSnapshot,
+        paths: &HashMap<u64, CgroupV2Path>,
+    ) -> MetricSnapshot {
+        let Some(path) = paths.get(&snapshot.cgroup_id().value()) else {
+            return snapshot;
+        };
+
+        let mut counters = snapshot.counters();
+
+        if let Ok(memory) = self.memory_reader.read_counters(path) {
+            counters.set_memory(
+                memory.memory_current_bytes,
+                memory.memory_limit_bytes,
+                memory.memory_pressure_some_total_us,
+                memory.memory_pressure_full_total_us,
+            );
+        }
+
+        if let Ok(disk) = self.disk_reader.read_counters(path) {
+            counters.set_disk_io(
+                disk.disk_read_bytes,
+                disk.disk_write_bytes,
+                disk.disk_read_ops,
+                disk.disk_write_ops,
+            );
+        }
+
+        MetricSnapshot::new(snapshot.cgroup_id(), counters)
     }
 }
 
 impl MetricSnapshotSource for BpfMetricSource {
     fn metric_snapshots(&self) -> Result<Vec<MetricSnapshot>, PrometheusError> {
-        self.loaded_bpf
+        let raw_snapshots = self
+            .loaded_bpf
             .lock()
             .map_err(|_| PrometheusError::SnapshotLock)?
             .metric_snapshots()
-            .map_err(PrometheusError::Bpf)
+            .map_err(PrometheusError::Bpf)?;
+
+        let paths = self.cgroup_lookup.build_map().unwrap_or_default();
+
+        Ok(raw_snapshots
+            .into_iter()
+            .map(|snapshot| self.enrich(snapshot, &paths))
+            .collect())
     }
 }
-
 #[derive(Debug, Default)]
 pub struct StaticMetricSource {
     snapshots: Vec<MetricSnapshot>,
