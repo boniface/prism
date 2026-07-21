@@ -211,6 +211,7 @@ fn process_exec_events(ring: &mut RingBuf<MapData>, settings: &SecuritySettings)
                 uid = event.uid,
                 gid = event.gid,
                 comm = %comm.as_ref(),
+                cgroup_id = event.cgroup_id,
                 exe_path = %exe_path,
                 timestamp_ns = event.timestamp_ns,
                 "process exec event"
@@ -228,6 +229,7 @@ fn process_exec_events(ring: &mut RingBuf<MapData>, settings: &SecuritySettings)
                 uid = event.uid,
                 gid = event.gid,
                 comm = %comm.as_ref(),
+                cgroup_id = event.cgroup_id,
                 timestamp_ns = event.timestamp_ns,
                 "process exec event"
             );
